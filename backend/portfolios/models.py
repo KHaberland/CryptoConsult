@@ -1,0 +1,126 @@
+from django.db import models
+from django.conf import settings
+
+
+class Portfolio(models.Model):
+    """Инвестиционный портфель пользователя."""
+    
+    # Опциональная связь с User (для будущей регистрации)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='portfolios',
+        null=True,
+        blank=True
+    )
+    
+    # Session ID для идентификации без авторизации
+    session_id = models.CharField(
+        max_length=36,
+        db_index=True,
+        verbose_name='ID сессии'
+    )
+    
+    name = models.CharField(
+        max_length=100,
+        default='Мой портфель',
+        verbose_name='Название портфеля'
+    )
+    
+    initial_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        verbose_name='Начальная сумма ($)'
+    )
+    
+    start_date = models.DateField(
+        auto_now_add=True,
+        verbose_name='Дата создания'
+    )
+    
+    target_years = models.IntegerField(
+        verbose_name='Горизонт инвестирования (лет)'
+    )
+    
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name='Активен'
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = 'Портфель'
+        verbose_name_plural = 'Портфели'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        if self.user:
+            return f'{self.name} ({self.user.email})'
+        return f'{self.name} (сессия: {self.session_id[:8]}...)'
+    
+    @property
+    def target_date(self):
+        """Целевая дата завершения стратегии."""
+        from datetime import timedelta
+        return self.start_date + timedelta(days=self.target_years * 365)
+
+
+class PortfolioAsset(models.Model):
+    """Актив в портфеле."""
+    
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='assets'
+    )
+    
+    symbol = models.CharField(
+        max_length=10,
+        verbose_name='Символ актива'
+    )
+    
+    name = models.CharField(
+        max_length=50,
+        blank=True,
+        verbose_name='Название актива'
+    )
+    
+    percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        verbose_name='Доля в портфеле (%)'
+    )
+    
+    # Цена на момент покупки (для расчёта прибыли/убытка)
+    initial_price = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        null=True,
+        blank=True,
+        verbose_name='Цена при покупке ($)'
+    )
+    
+    class Meta:
+        verbose_name = 'Актив портфеля'
+        verbose_name_plural = 'Активы портфеля'
+        unique_together = ['portfolio', 'symbol']
+    
+    def __str__(self):
+        return f'{self.symbol} ({self.percentage}%)'
+    
+    @property
+    def initial_value(self):
+        """Начальная стоимость актива в портфеле."""
+        return float(self.portfolio.initial_amount) * float(self.percentage) / 100
+
+
+# Базовый портфель по умолчанию
+DEFAULT_PORTFOLIO_ASSETS = [
+    {'symbol': 'BTC', 'name': 'Bitcoin', 'percentage': 50.0},
+    {'symbol': 'ETH', 'name': 'Ethereum', 'percentage': 25.0},
+    {'symbol': 'BNB', 'name': 'Binance Coin', 'percentage': 7.5},
+    {'symbol': 'SOL', 'name': 'Solana', 'percentage': 7.5},
+    {'symbol': 'USDT', 'name': 'Tether', 'percentage': 10.0},
+]
