@@ -1,10 +1,11 @@
+from decimal import Decimal
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from datetime import date
 
-from .models import Portfolio, PortfolioAsset, PortfolioContribution
+from .models import Portfolio, PortfolioAsset, PortfolioContribution, PortfolioWithdrawal
 from .serializers import (
     PortfolioSerializer,
     PortfolioCreateSerializer,
@@ -148,6 +149,16 @@ class PortfolioValueView(APIView):
             for c in portfolio.contributions.all().order_by('contributed_at')
         ]
         
+        # Список выводов средств (дата и сумма)
+        withdrawals = [
+            {
+                'id': w.id,
+                'amount': float(w.amount),
+                'withdrawn_at': w.withdrawn_at,
+            }
+            for w in portfolio.withdrawals.all().order_by('withdrawn_at')
+        ]
+        
         today = date.today()
         target_date = portfolio.target_date
         days_remaining = (target_date - today).days if target_date > today else 0
@@ -167,6 +178,7 @@ class PortfolioValueView(APIView):
             'days_remaining': days_remaining,
             'assets': assets_data,
             'contributions': contributions,
+            'withdrawals': withdrawals,
         }
         
         return Response(response_data)
@@ -400,6 +412,11 @@ class WithdrawPortfolioView(APIView):
         assets_by_symbol = {a.symbol: a for a in portfolio.assets.all()}
         prices = price_service.get_prices(list(assets_by_symbol.keys()))
 
+        # Стоимость портфеля до вывода (для сохранения value_after)
+        analyzer = PortfolioAnalyzer(portfolio)
+        value_before = analyzer.get_current_value()['current_value']
+        total_withdrawn = 0.0
+
         for item in assets_data:
             symbol = item.get('symbol', '').upper()
             try:
@@ -425,9 +442,21 @@ class WithdrawPortfolioView(APIView):
             if units_to_sell <= 0:
                 continue
 
+            price = prices.get(symbol, 0) or 0
+            total_withdrawn += units_to_sell * price if price else 0
+
             new_units = units_current - units_to_sell
             asset.units = max(0, new_units)
             asset.save(update_fields=['units'])
+
+        # Сохраняем вывод (не считается просадкой; новая стоимость — база для просадки)
+        if total_withdrawn > 0:
+            value_after = value_before - total_withdrawn
+            PortfolioWithdrawal.objects.create(
+                portfolio=portfolio,
+                amount=Decimal(str(round(total_withdrawn, 2))),
+                value_after=Decimal(str(max(0, round(value_after, 2)))),
+            )
 
         return Response({
             'success': True,

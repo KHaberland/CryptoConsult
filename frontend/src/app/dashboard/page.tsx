@@ -242,6 +242,42 @@ export default function DashboardPage() {
                   )}
                 </div>
               )}
+
+              {/* Вывод средств */}
+              <div className="mt-6 pt-6 border-t border-gray-200">
+                <div className="flex items-center gap-2 mb-3">
+                  <Wallet className="w-5 h-5 text-primary-600" />
+                  <span className="font-semibold text-gray-900">Вывод средств</span>
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-gray-200">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        <th className="px-4 py-2 text-left font-medium text-gray-700">Дата вывода</th>
+                        <th className="px-4 py-2 text-right font-medium text-gray-700">Сумма вывода</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(portfolioValue.withdrawals?.length ?? 0) > 0 ? (
+                        portfolioValue.withdrawals?.map((w) => (
+                          <tr key={w.id} className="border-b border-gray-100 last:border-0">
+                            <td className="px-4 py-2 text-gray-700">{formatDate(w.withdrawn_at)}</td>
+                            <td className="px-4 py-2 text-right font-medium text-gray-900">
+                              {formatCurrency(w.amount)}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={2} className="px-4 py-4 text-center text-gray-500">
+                            Нет выводов
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
               
               {/* Timeline */}
               <div className="mt-6 pt-6 border-t">

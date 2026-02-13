@@ -19,6 +19,12 @@ interface Contribution {
   contributed_at: string
 }
 
+interface Withdrawal {
+  id: number
+  amount: number
+  withdrawn_at: string
+}
+
 interface PortfolioValue {
   portfolio_id: number
   portfolio_name: string
@@ -33,6 +39,7 @@ interface PortfolioValue {
   days_remaining: number
   assets: Asset[]
   contributions?: Contribution[]
+  withdrawals?: Withdrawal[]
 }
 
 interface InvestorProfile {

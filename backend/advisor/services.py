@@ -151,16 +151,22 @@ class PortfolioAnalyzer:
     def get_drawdown(self) -> Dict:
         """
         Рассчитать текущую просадку.
-        Просадка = (пиковое значение - текущее значение) / пиковое значение * 100
+        Вывод средств НЕ считается просадкой. После вывода новая стоимость — база.
+        Просадка = падение стоимости активов от базы (дата первого взноса / последнего вывода).
         """
         value_data = self.get_current_value()
-        total_invested = value_data['initial_value']
         current_value = value_data['current_value']
         
-        # Для MVP используем максимальное из (вложено, текущее) как пик
-        peak_value = max(total_invested, current_value)
+        # База: стоимость после последнего вывода или начальная (если выводов не было)
+        last_withdrawal = self.portfolio.withdrawals.first()
+        if last_withdrawal and last_withdrawal.value_after is not None:
+            base_value = float(last_withdrawal.value_after)
+        else:
+            base_value = value_data['initial_value']
         
-        if current_value >= peak_value:
+        peak_value = max(base_value, current_value)
+        
+        if current_value >= peak_value or peak_value <= 0:
             drawdown = 0
         else:
             drawdown = (peak_value - current_value) / peak_value * 100
@@ -169,6 +175,7 @@ class PortfolioAnalyzer:
             'current_drawdown': drawdown,
             'peak_value': peak_value,
             'current_value': current_value,
+            'base_value': base_value,
         }
     
     def get_time_metrics(self) -> Dict:

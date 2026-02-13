@@ -55,20 +55,23 @@ class ProfileLookupView(APIView):
             analysis = None
 
             if portfolio:
-                # Используем PortfolioAnalyzer — учитывает реальные units и взносы (DCA)
+                # Используем PortfolioAnalyzer — учитывает реальные units, взносы (DCA) и выводы
                 try:
                     analyzer = PortfolioAnalyzer(portfolio)
                     value_data = analyzer.get_current_value()
+                    drawdown_data = analyzer.get_drawdown()
                     initial_value = value_data['initial_value']
                     current_value = value_data['current_value']
                     profit_loss = value_data['profit_loss']
                     profit_loss_percent = value_data['profit_loss_percent']
+                    current_drawdown = drawdown_data['current_drawdown']
                 except Exception as e:
                     logger.warning("PortfolioAnalyzer failed in lookup: %s", e)
                     initial_value = float(portfolio.initial_amount or 0)
                     current_value = initial_value
                     profit_loss = 0
                     profit_loss_percent = 0
+                    current_drawdown = 0
 
                 # Дней с момента создания (безопасно для date/datetime)
                 start_date = portfolio.start_date
@@ -92,18 +95,27 @@ class ProfileLookupView(APIView):
                 # Генерируем анализ
                 max_drawdown = getattr(profile, 'max_drawdown', 20) or 20
 
-                if profit_loss_percent >= 0:
-                    # Прибыль
-                    analysis = {
-                        'status': 'profit',
-                        'icon': '📈',
-                        'title': f'Прибыль: +{profit_loss_percent:.1f}%',
-                        'message': f'🎉 Поздравляем! Ваш портфель вырос на {profit_loss_percent:.1f}%!',
-                        'recommendation': 'Отличный результат! Продолжайте следовать стратегии.'
-                    }
+                if current_drawdown <= 0:
+                    # Нет просадки (вывод средств не считается просадкой)
+                    if profit_loss_percent >= 0:
+                        analysis = {
+                            'status': 'profit',
+                            'icon': '📈',
+                            'title': f'Прибыль: +{profit_loss_percent:.1f}%',
+                            'message': f'🎉 Поздравляем! Ваш портфель вырос на {profit_loss_percent:.1f}%!',
+                            'recommendation': 'Отличный результат! Продолжайте следовать стратегии.'
+                        }
+                    else:
+                        analysis = {
+                            'status': 'normal',
+                            'icon': '📊',
+                            'title': 'В норме',
+                            'message': 'Просадка в пределах нормы. Вывод средств не учитывается в расчёте просадки.',
+                            'recommendation': 'Продолжайте придерживаться стратегии.'
+                        }
                 else:
-                    # Просадка
-                    drawdown = abs(profit_loss_percent)
+                    # Просадка (только от стоимости активов, выводы не учитываются)
+                    drawdown = current_drawdown
                     drawdown_ratio = drawdown / max_drawdown if max_drawdown > 0 else 0
 
                     if drawdown_ratio < 0.8:
