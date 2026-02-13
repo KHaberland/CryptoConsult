@@ -54,7 +54,7 @@ interface PortfolioState {
   fetchProfile: () => Promise<void>
   createProfile: (data: Omit<InvestorProfile, 'id'>) => Promise<void>
   fetchPortfolioValue: (force?: boolean) => Promise<void>
-  createPortfolio: (data: { name: string; initial_amount: number; target_years: number }) => Promise<void>
+  createPortfolio: (data: { name: string; initial_amount: number; target_years: number; experience_level?: string }) => Promise<void>
   clearError: () => void
 }
 
@@ -152,7 +152,7 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
   createPortfolio: async (data) => {
     set({ isLoading: true, error: null })
     try {
-      await portfolioApi.create({ ...data, use_default_assets: true })
+      await portfolioApi.create({ ...data, use_default_assets: true, experience_level: data.experience_level })
       // После создания загружаем данные (force = true)
       const value = await portfolioApi.getValue()
       set({ portfolioValue: value, hasPortfolio: true, isLoading: false, lastFetchTime: Date.now() })

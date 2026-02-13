@@ -110,6 +110,7 @@ export const portfolioApi = {
     target_years: number
     use_default_assets?: boolean
     custom_assets?: Array<{ symbol: string; name: string; percentage: number }>
+    experience_level?: string
   }) => {
     const response = await api.post('/portfolio/', data)
     return response.data

@@ -46,7 +46,8 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
     """Сериализатор для создания портфеля."""
     use_default_assets = serializers.BooleanField(default=True, write_only=True)
     custom_assets = PortfolioAssetSerializer(many=True, required=False, write_only=True)
-    
+    experience_level = serializers.CharField(required=False, allow_blank=True, write_only=True)
+
     class Meta:
         model = Portfolio
         fields = (
@@ -55,22 +56,23 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
             'target_years',
             'use_default_assets',
             'custom_assets',
+            'experience_level',
         )
-    
+
     def validate_initial_amount(self, value):
         if value < 1000:
             raise serializers.ValidationError(
                 'Минимальная сумма инвестиций — $1,000.'
             )
         return value
-    
+
     def validate_target_years(self, value):
         if not 1 <= value <= 7:
             raise serializers.ValidationError(
                 'Горизонт инвестирования должен быть от 1 до 7 лет.'
             )
         return value
-    
+
     def validate_custom_assets(self, value):
         if value:
             total_percentage = sum(asset['percentage'] for asset in value)
@@ -78,8 +80,6 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     f'Сумма долей должна равняться 100%. Текущая сумма: {total_percentage}%'
                 )
-            
-            # Проверяем, что все символы поддерживаются
             for asset in value:
                 if not PriceService.is_symbol_supported(asset.get('symbol', '')):
                     raise serializers.ValidationError(
@@ -87,36 +87,36 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
                         f"Доступные: {', '.join(PriceService.get_supported_symbols())}"
                     )
         return value
-    
+
     def create(self, validated_data):
         use_default = validated_data.pop('use_default_assets', True)
         custom_assets = validated_data.pop('custom_assets', None)
-        
-        # session_id передаётся через serializer.save(session_id=session_id)
-        # DRF добавляет его в validated_data при вызове create()
+        experience_level = (validated_data.pop('experience_level', '') or '').strip().lower()
+
         session_id = validated_data.get('session_id')
         if not session_id:
             raise ValueError("session_id is required")
-        
-        # Создаём портфель
+
         portfolio = Portfolio.objects.create(**validated_data)
-        
-        # Определяем активы для добавления
-        if use_default or not custom_assets:
+        price_service = PriceService()
+
+        if experience_level == 'beginner':
+            assets_to_add = price_service.get_beginner_portfolio_assets()
+        elif use_default or not custom_assets:
             assets_to_add = DEFAULT_PORTFOLIO_ASSETS
         else:
             assets_to_add = custom_assets
-        
-        # Получаем текущие цены для всех активов
-        symbols = [asset['symbol'] for asset in assets_to_add]
-        price_service = PriceService()
-        current_prices = price_service.get_prices(symbols)
-        
-        # Создаём активы с начальными ценами
+
+        symbols = [a.get('symbol') or a['symbol'] for a in assets_to_add]
+        need_prices = not any(a.get('initial_price') is not None for a in assets_to_add)
+        current_prices = price_service.get_prices(symbols) if need_prices else {}
+
         for asset_data in assets_to_add:
-            symbol = asset_data['symbol']
-            initial_price = current_prices.get(symbol, None)
-            
+            symbol = asset_data.get('symbol') or asset_data['symbol']
+            initial_price = asset_data.get('initial_price')
+            if initial_price is None:
+                initial_price = current_prices.get(symbol)
+
             PortfolioAsset.objects.create(
                 portfolio=portfolio,
                 symbol=symbol,
@@ -124,7 +124,7 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
                 percentage=asset_data['percentage'],
                 initial_price=initial_price
             )
-        
+
         return portfolio
 
 

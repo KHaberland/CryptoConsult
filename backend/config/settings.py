@@ -6,11 +6,14 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load .env from project root (один файл для всех ключей)
+load_dotenv(BASE_DIR.parent / '.env')
+
+# Load environment variables (fallback: .env в текущей папке)
+load_dotenv()
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-change-me-in-production')
@@ -39,6 +42,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'config.middleware.EnsureCorsMiddleware',  # CORS на все ответы (в т.ч. 500)
     'config.middleware.SessionIdMiddleware',  # Session ID для идентификации без авторизации
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -128,9 +132,20 @@ REST_FRAMEWORK = {
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://localhost:3001',
+    'http://localhost:3002',
+    'http://localhost:3003',
     'http://127.0.0.1:3000',
     'http://127.0.0.1:3001',
+    'http://127.0.0.1:3002',
+    'http://127.0.0.1:3003',
 ]
+# В разработке разрешаем любой localhost/127.0.0.1 с любым портом (с сохранением credentials)
+if DEBUG:
+    import re
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        re.compile(r'^http://localhost(:\d+)?$'),
+        re.compile(r'^http://127\.0\.0\.1(:\d+)?$'),
+    ]
 
 CORS_ALLOW_CREDENTIALS = True
 

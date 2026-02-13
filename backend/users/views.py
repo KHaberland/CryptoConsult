@@ -1,3 +1,4 @@
+import logging
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -9,30 +10,32 @@ from .models import InvestorProfile
 from portfolios.models import Portfolio
 from portfolios.services import PriceService
 
+logger = logging.getLogger(__name__)
+
 
 class ProfileLookupView(APIView):
     """Поиск профиля по имени (для MVP без регистрации)."""
     permission_classes = (AllowAny,)
-    
+
     def get(self, request):
         """
         Найти профиль по имени.
-        
+
         Query params:
             name: Имя пользователя
-        
+
         Returns:
             200: Профиль найден + данные портфеля + анализ
             404: Профиль не найден
         """
         name = request.query_params.get('name', '').strip()
-        
+
         if not name:
             return Response(
                 {'detail': 'Параметр name обязателен.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             profile = InvestorProfile.objects.get(name__iexact=name)
         except InvestorProfile.DoesNotExist:
@@ -40,108 +43,135 @@ class ProfileLookupView(APIView):
                 {'detail': 'Пользователь не найден.', 'exists': False},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
-        # Получаем портфель
-        portfolio = Portfolio.objects.filter(
-            session_id=profile.session_id,
-            is_active=True
-        ).first()
-        
-        portfolio_data = None
-        analysis = None
-        
-        if portfolio:
-            # Рассчитываем текущую стоимость
-            assets = portfolio.assets.all()
-            symbols = [asset.symbol for asset in assets]
-            
-            price_service = PriceService()
-            price_data = price_service.get_prices(symbols)
-            
-            initial_value = float(portfolio.initial_amount)
-            current_value = 0
-            
-            for asset in assets:
-                current_price = price_data.get(asset.symbol, 0)
-                asset_initial_value = initial_value * float(asset.percentage) / 100
-                
-                if asset.initial_price and current_price:
-                    units = asset_initial_value / float(asset.initial_price)
-                    asset_current_value = units * current_price
-                else:
-                    asset_current_value = asset_initial_value
-                
-                current_value += asset_current_value
-            
-            profit_loss = current_value - initial_value
-            profit_loss_percent = (profit_loss / initial_value * 100) if initial_value > 0 else 0
-            
-            # Дней с момента создания
-            days_active = (date.today() - portfolio.start_date).days
-            
-            portfolio_data = {
-                'name': portfolio.name,
-                'start_date': portfolio.start_date.isoformat(),
-                'initial_value': round(initial_value, 2),
-                'current_value': round(current_value, 2),
-                'profit_loss': round(profit_loss, 2),
-                'profit_loss_percent': round(profit_loss_percent, 2),
-                'days_active': days_active,
-            }
-            
-            # Генерируем анализ
-            max_drawdown = profile.max_drawdown
-            
-            if profit_loss_percent >= 0:
-                # Прибыль
-                analysis = {
-                    'status': 'profit',
-                    'icon': '📈',
-                    'title': f'Прибыль: +{profit_loss_percent:.1f}%',
-                    'message': f'🎉 Поздравляем! Ваш портфель вырос на {profit_loss_percent:.1f}%!',
-                    'recommendation': 'Отличный результат! Продолжайте следовать стратегии.'
+
+        # Получаем портфель и считаем данные (любая ошибка — 500 с CORS и логом)
+        try:
+            portfolio = Portfolio.objects.filter(
+                session_id=profile.session_id,
+                is_active=True
+            ).first()
+
+            portfolio_data = None
+            analysis = None
+
+            if portfolio:
+                # Рассчитываем текущую стоимость (устойчиво к сбоям API цен)
+                assets = list(portfolio.assets.all())
+                symbols = [a.symbol for a in assets]
+
+                try:
+                    price_service = PriceService()
+                    price_data = price_service.get_prices(symbols)
+                except Exception as e:
+                    logger.warning("PriceService failed in lookup, using zeros: %s", e)
+                    price_data = {}
+
+                initial_value = float(portfolio.initial_amount or 0)
+                current_value = 0.0
+
+                for asset in assets:
+                    current_price = price_data.get(asset.symbol, 0) or 0
+                    pct = float(asset.percentage or 0) / 100
+                    asset_initial_value = initial_value * pct
+
+                    if asset.initial_price and current_price:
+                        try:
+                            units = asset_initial_value / float(asset.initial_price)
+                            asset_current_value = units * current_price
+                        except (TypeError, ZeroDivisionError):
+                            asset_current_value = asset_initial_value
+                    else:
+                        asset_current_value = asset_initial_value
+
+                    current_value += asset_current_value
+
+                profit_loss = current_value - initial_value
+                profit_loss_percent = (profit_loss / initial_value * 100) if initial_value > 0 else 0
+
+                # Дней с момента создания (безопасно для date/datetime)
+                start_date = portfolio.start_date
+                if hasattr(start_date, 'date'):
+                    start_date = start_date.date()
+                try:
+                    days_active = (date.today() - start_date).days
+                except (TypeError, AttributeError):
+                    days_active = 0
+
+                portfolio_data = {
+                    'name': portfolio.name or 'Мой портфель',
+                    'start_date': start_date.isoformat() if start_date else '',
+                    'initial_value': round(initial_value, 2),
+                    'current_value': round(current_value, 2),
+                    'profit_loss': round(profit_loss, 2),
+                    'profit_loss_percent': round(profit_loss_percent, 2),
+                    'days_active': days_active,
                 }
-            else:
-                # Просадка
-                drawdown = abs(profit_loss_percent)
-                drawdown_ratio = drawdown / max_drawdown if max_drawdown > 0 else 0
-                
-                if drawdown_ratio < 0.8:
-                    # Просадка в норме
+
+                # Генерируем анализ
+                max_drawdown = getattr(profile, 'max_drawdown', 20) or 20
+
+                if profit_loss_percent >= 0:
+                    # Прибыль
                     analysis = {
-                        'status': 'normal',
-                        'icon': '📉',
-                        'title': f'Просадка: -{drawdown:.1f}%',
-                        'message': f'✅ Величина просадки укладывается в допустимый уровень ({max_drawdown}%).',
-                        'recommendation': 'Продолжайте придерживаться стратегии. Краткосрочные колебания — это норма.'
-                    }
-                elif drawdown_ratio < 1.0:
-                    # Приближается к лимиту
-                    analysis = {
-                        'status': 'warning',
-                        'icon': '⚠️',
-                        'title': f'Просадка: -{drawdown:.1f}%',
-                        'message': f'⚠️ Внимание! Просадка приближается к допустимому уровню ({max_drawdown}%).',
-                        'recommendation': 'Следите за рынком внимательнее. Возможно, стоит приостановить докупки.'
+                        'status': 'profit',
+                        'icon': '📈',
+                        'title': f'Прибыль: +{profit_loss_percent:.1f}%',
+                        'message': f'🎉 Поздравляем! Ваш портфель вырос на {profit_loss_percent:.1f}%!',
+                        'recommendation': 'Отличный результат! Продолжайте следовать стратегии.'
                     }
                 else:
-                    # Превышает лимит
-                    analysis = {
-                        'status': 'critical',
-                        'icon': '🔴',
-                        'title': f'Просадка: -{drawdown:.1f}%',
-                        'message': f'🔴 Просадка превысила допустимый уровень ({max_drawdown}%)!',
-                        'recommendation': 'Рассмотрите частичный перевод в стейблкоины (10-20%). НЕ продавайте всё в панике.'
-                    }
-        
-        return Response({
-            'exists': True,
-            'session_id': profile.session_id,
-            'name': profile.name,
-            'created_at': profile.created_at.isoformat(),
-            'portfolio': portfolio_data,
-            'analysis': analysis,
-        })
+                    # Просадка
+                    drawdown = abs(profit_loss_percent)
+                    drawdown_ratio = drawdown / max_drawdown if max_drawdown > 0 else 0
+
+                    if drawdown_ratio < 0.8:
+                        # Просадка в норме
+                        analysis = {
+                            'status': 'normal',
+                            'icon': '📉',
+                            'title': f'Просадка: -{drawdown:.1f}%',
+                            'message': f'✅ Величина просадки укладывается в допустимый уровень ({max_drawdown}%).',
+                            'recommendation': 'Продолжайте придерживаться стратегии. Краткосрочные колебания — это норма.'
+                        }
+                    elif drawdown_ratio < 1.0:
+                        # Приближается к лимиту
+                        analysis = {
+                            'status': 'warning',
+                            'icon': '⚠️',
+                            'title': f'Просадка: -{drawdown:.1f}%',
+                            'message': f'⚠️ Внимание! Просадка приближается к допустимому уровню ({max_drawdown}%).',
+                            'recommendation': 'Следите за рынком внимательнее. Возможно, стоит приостановить докупки.'
+                        }
+                    else:
+                        # Превышает лимит
+                        analysis = {
+                            'status': 'critical',
+                            'icon': '🔴',
+                            'title': f'Просадка: -{drawdown:.1f}%',
+                            'message': f'🔴 Просадка превысила допустимый уровень ({max_drawdown}%)!',
+                            'recommendation': 'Рассмотрите частичный перевод в стейблкоины (10-20%). НЕ продавайте всё в панике.'
+                        }
+
+            created_at = profile.created_at
+            if hasattr(created_at, 'isoformat'):
+                created_at = created_at.isoformat() if created_at else ''
+            else:
+                created_at = str(created_at) if created_at else ''
+
+            return Response({
+                'exists': True,
+                'session_id': profile.session_id,
+                'name': profile.name or '',
+                'created_at': created_at,
+                'portfolio': portfolio_data,
+                'analysis': analysis,
+            })
+        except Exception as e:
+            logger.exception("Profile lookup error for name=%s", name)
+            return Response(
+                {'detail': 'Ошибка сервера при получении данных.', 'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class InvestorProfileView(APIView):

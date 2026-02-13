@@ -1,9 +1,31 @@
 """
-Middleware для работы с session_id.
-Позволяет идентифицировать пользователей без регистрации.
+Middleware для работы с session_id и CORS.
 """
 
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class EnsureCorsMiddleware:
+    """
+    Добавляет CORS-заголовки к любому ответу, у которого их ещё нет.
+    Нужно, чтобы при 500 и других ошибках браузер получал CORS и не скрывал текст ошибки.
+    """
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        origin = request.headers.get('Origin')
+        if origin and not response.get('Access-Control-Allow-Origin'):
+            response['Access-Control-Allow-Origin'] = origin
+            response['Access-Control-Allow-Credentials'] = 'true'
+            if request.method == 'OPTIONS':
+                response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+                response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Session-ID'
+        return response
 
 
 class SessionIdMiddleware:

@@ -99,7 +99,7 @@ class PriceService:
     
     COINGECKO_URL = "https://api.coingecko.com/api/v3"
     
-    # Маппинг символов на ID CoinGecko
+    # Маппинг символов на ID CoinGecko (включая частые из топ-15 для портфеля новичка)
     SYMBOL_TO_ID = {
         "BTC": "bitcoin",
         "ETH": "ethereum",
@@ -112,6 +112,7 @@ class PriceService:
         "DOGE": "dogecoin",
         "DOT": "polkadot",
         "MATIC": "matic-network",
+        "POL": "polygon-ecosystem-token",
         "AVAX": "avalanche-2",
         "LINK": "chainlink",
         "UNI": "uniswap",
@@ -119,13 +120,21 @@ class PriceService:
         "LTC": "litecoin",
         "TRX": "tron",
         "SHIB": "shiba-inu",
+        "BCH": "bitcoin-cash",
+        "LEO": "leo-token",
+        "HYPE": "hyperliquid",
+        "USDE": "ethena-usde",
+        "USDS": "usds",
+        "CC": "canton-network",
+        "XMR": "monero",
+        "DAI": "dai",
+        "STETH": "staked-ether",
+        "WBTC": "wrapped-bitcoin",
     }
     
     # Обратный маппинг
     ID_TO_SYMBOL = {v: k for k, v in SYMBOL_TO_ID.items()}
     
-    # Запасные цены (обновляются при успешных запросах)
-    # Используются когда API недоступен
     FALLBACK_PRICES = {
         "BTC": 100000.0,
         "ETH": 3500.0,
@@ -138,6 +147,7 @@ class PriceService:
         "DOGE": 0.4,
         "DOT": 8.0,
         "MATIC": 0.5,
+        "POL": 0.5,
         "AVAX": 40.0,
         "LINK": 25.0,
         "UNI": 15.0,
@@ -145,6 +155,16 @@ class PriceService:
         "LTC": 130.0,
         "TRX": 0.25,
         "SHIB": 0.00003,
+        "BCH": 500.0,
+        "LEO": 8.0,
+        "HYPE": 30.0,
+        "USDE": 1.0,
+        "USDS": 1.0,
+        "CC": 0.16,
+        "XMR": 320.0,
+        "DAI": 1.0,
+        "STETH": 3500.0,
+        "WBTC": 100000.0,
     }
     
     def __init__(self):
@@ -515,8 +535,134 @@ class PriceService:
     def get_supported_symbols(cls) -> List[str]:
         """Получить список поддерживаемых символов."""
         return list(cls.SYMBOL_TO_ID.keys())
-    
+
     @classmethod
     def is_symbol_supported(cls, symbol: str) -> bool:
         """Проверить, поддерживается ли символ."""
         return symbol.upper() in cls.SYMBOL_TO_ID
+
+    # Стейблкойны по символу (CoinGecko)
+    STABLECOIN_SYMBOLS = frozenset({
+        "usdt", "usdc", "busd", "dai", "tusd", "usdd", "pyusd", "usds", "usde",
+        "fdusd", "usdp", "frax", "gusd", "usdy", "usd1", "usdg", "usdf", "bfusd",
+        "usdtb", "usd0", "usdai", "gho", "rlusd", "figr_heloc",
+    })
+
+    def fetch_top_coins_from_coingecko(self, per_page: int = 15) -> List[Dict]:
+        """
+        Получить топ монет по капитализации с CoinGecko.
+
+        Returns:
+            Список словарей: [{"symbol": "BTC", "name": "Bitcoin", "market_cap": ...}, ...]
+        """
+        cache_key = f"coingecko_top_{per_page}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            logger.debug("Топ монет получен из кэша")
+            return cached
+
+        self.rate_limiter.wait_if_needed()
+        try:
+            response = requests.get(
+                f"{self.COINGECKO_URL}/coins/markets",
+                params={
+                    "vs_currency": "usd",
+                    "order": "market_cap_desc",
+                    "per_page": per_page,
+                    "page": 1,
+                    "sparkline": "false",
+                },
+                timeout=15,
+            )
+            if response.status_code == 429:
+                self.rate_limiter.set_blocked(60)
+                raise requests.RequestException("Rate limited (429)")
+            response.raise_for_status()
+            data = response.json()
+
+            result = []
+            for coin in data:
+                symbol = (coin.get("symbol") or "").upper()
+                name = coin.get("name") or symbol
+                result.append({
+                    "symbol": symbol,
+                    "name": name,
+                    "market_cap": coin.get("market_cap") or 0,
+                    "current_price": coin.get("current_price") or 0,
+                })
+            if result:
+                self.cache.set(cache_key, result)
+            logger.info(f"CoinGecko: загружен топ-{len(result)} монет")
+            return result
+        except requests.RequestException as e:
+            logger.error(f"Ошибка CoinGecko топ: {e}")
+            stale = self.cache.get_stale(cache_key)
+            if stale:
+                return stale
+            return []
+
+    def get_beginner_portfolio_assets(self) -> List[Dict]:
+        """
+        Портфель для новичка на основе топ-15 CoinGecko:
+        BTC 50%, ETH 30%, Стейблкойны 10%, Альты (5 из топ-15 кроме BTC/ETH/стейблов) 10% (по 2% каждый).
+        """
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        if not top:
+            # Fallback на фиксированную структуру, если API недоступен
+            return [
+                {"symbol": "BTC", "name": "Bitcoin", "percentage": 50.0},
+                {"symbol": "ETH", "name": "Ethereum", "percentage": 30.0},
+                {"symbol": "USDT", "name": "Tether", "percentage": 10.0},
+                {"symbol": "XRP", "name": "XRP", "percentage": 2.0},
+                {"symbol": "BNB", "name": "BNB", "percentage": 2.0},
+                {"symbol": "SOL", "name": "Solana", "percentage": 2.0},
+                {"symbol": "USDC", "name": "USD Coin", "percentage": 2.0},
+                {"symbol": "DOGE", "name": "Dogecoin", "percentage": 2.0},
+            ]
+
+        assets: List[Dict] = []
+        btc_done = eth_done = stable_done = False
+        alts: List[Dict] = []
+
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            name = coin.get("name") or sym
+            price = coin.get("current_price") or 0
+            if sym == "BTC" and not btc_done:
+                assets.append({"symbol": sym, "name": name, "percentage": 50.0, "initial_price": price})
+                btc_done = True
+            elif sym == "ETH" and not eth_done:
+                assets.append({"symbol": sym, "name": name, "percentage": 30.0, "initial_price": price})
+                eth_done = True
+            elif (coin.get("symbol") or "").lower() in self.STABLECOIN_SYMBOLS and not stable_done:
+                assets.append({"symbol": sym, "name": name, "percentage": 10.0, "initial_price": price})
+                stable_done = True
+            else:
+                # Альты: не BTC, не ETH, не стейблкойн
+                if sym not in ("BTC", "ETH") and (coin.get("symbol") or "").lower() not in self.STABLECOIN_SYMBOLS:
+                    alts.append({"symbol": sym, "name": name, "initial_price": price})
+
+        # Ровно 5 альтов по 2%
+        for alt in alts[:5]:
+            assets.append({
+                "symbol": alt["symbol"],
+                "name": alt["name"],
+                "percentage": 2.0,
+                "initial_price": alt.get("initial_price"),
+            })
+
+        # Если стейбла не было в топ-15, добавляем USDT 10%
+        if not stable_done:
+            insert_idx = 2
+            for i, a in enumerate(assets):
+                if a.get("symbol") == "ETH":
+                    insert_idx = i + 1
+                    break
+            assets.insert(insert_idx, {"symbol": "USDT", "name": "Tether", "percentage": 10.0, "initial_price": 1.0})
+
+        total = sum(a["percentage"] for a in assets)
+        if abs(total - 100.0) > 0.01:
+            diff = 100.0 - total
+            if assets:
+                assets[-1]["percentage"] = round(assets[-1]["percentage"] + diff, 2)
+        return assets
