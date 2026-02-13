@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Portfolio, PortfolioAsset, DEFAULT_PORTFOLIO_ASSETS
+from .models import Portfolio, PortfolioAsset, PortfolioContribution, DEFAULT_PORTFOLIO_ASSETS
 from .services import PriceService
 
 
@@ -116,13 +116,20 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
             initial_price = asset_data.get('initial_price')
             if initial_price is None:
                 initial_price = current_prices.get(symbol)
+            initial_price = initial_price or 0
+
+            # Рассчитываем units для учёта взносов
+            pct = float(asset_data['percentage'])
+            asset_value = float(validated_data['initial_amount']) * pct / 100
+            units = (asset_value / initial_price) if initial_price else 0
 
             PortfolioAsset.objects.create(
                 portfolio=portfolio,
                 symbol=symbol,
                 name=asset_data.get('name', symbol),
                 percentage=asset_data['percentage'],
-                initial_price=initial_price
+                initial_price=initial_price,
+                units=units
             )
 
         return portfolio

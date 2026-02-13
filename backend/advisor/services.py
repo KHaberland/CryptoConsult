@@ -2,12 +2,14 @@
 Сервис ИИ-консультанта.
 """
 
-from openai import OpenAI
-from django.conf import settings
-from typing import Optional, Dict, List
+import json
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
-import logging
+from typing import Optional, Dict, List
+
+from django.conf import settings
+from openai import OpenAI
 
 from portfolios.models import Portfolio
 from portfolios.services import PriceService
@@ -24,14 +26,74 @@ class PortfolioAnalyzer:
         self.portfolio = portfolio
         self.price_service = PriceService()
     
+    def _get_profile(self):
+        """Получить профиль инвестора по session_id портфеля."""
+        try:
+            return InvestorProfile.objects.get(session_id=self.portfolio.session_id)
+        except InvestorProfile.DoesNotExist:
+            return None
+    
+    def _get_total_invested(self) -> float:
+        """Сумма всех вложений: начальный взнос + дополнительные взносы."""
+        contributions_sum = sum(
+            float(c.amount) for c in self.portfolio.contributions.all()
+        )
+        return float(self.portfolio.initial_amount) + contributions_sum
+    
+    def _get_dca_corrected_invested(self) -> tuple:
+        """
+        Для DCA: вернуть (total_invested, units_scale).
+        units_scale = множитель для units (1.0 = без коррекции).
+        Если портфель создан с полной суммой вместо первой части — корректируем.
+        """
+        profile = self._get_profile()
+        if not profile or not getattr(profile, 'use_dca', False):
+            return self._get_total_invested(), 1.0
+        
+        dca_parts = profile.dca_parts or 4
+        if profile.experience_level == 'beginner':
+            dca_parts = 3
+        if dca_parts <= 1:
+            return self._get_total_invested(), 1.0
+        
+        investment_amount = float(profile.investment_amount or 0)
+        if investment_amount <= 0:
+            return self._get_total_invested(), 1.0
+        
+        first_part = investment_amount / dca_parts
+        contributions_sum = sum(
+            float(c.amount) for c in self.portfolio.contributions.all()
+        )
+        correct_total_invested = first_part + contributions_sum
+        
+        initial_amount = float(self.portfolio.initial_amount or 0)
+        # Портфель создан с полной суммой? (initial_amount ≈ investment_amount)
+        is_full_amount = (
+            initial_amount > 0 and investment_amount > 0
+            and abs(initial_amount - investment_amount) / investment_amount < 0.02
+        )
+        if is_full_amount:
+            # Масштаб: (первая часть + взносы) / (полная сумма + взносы)
+            wrong_total = initial_amount + contributions_sum
+            correct_total = first_part + contributions_sum
+            scale = correct_total / wrong_total if wrong_total > 0 else 1.0
+            return correct_total_invested, scale
+        
+        return correct_total_invested, 1.0
+
+    def get_units_scale(self) -> float:
+        """Множитель для units (1.0 = без DCA-коррекции). Нужен для вывода средств."""
+        _, scale = self._get_dca_corrected_invested()
+        return scale
+
     def get_current_value(self) -> Dict:
-        """Рассчитать текущую стоимость портфеля."""
+        """Рассчитать текущую стоимость портфеля с учётом всех взносов."""
         assets = self.portfolio.assets.all()
         symbols = [asset.symbol for asset in assets]
         
         price_data = self.price_service.get_prices_with_changes(symbols)
+        total_invested, units_scale = self._get_dca_corrected_invested()
         
-        initial_value = float(self.portfolio.initial_amount)
         total_value = 0
         assets_info = []
         
@@ -40,13 +102,20 @@ class PortfolioAnalyzer:
             current_price = symbol_data.get('price', 0)
             change_24h = symbol_data.get('change_24h', 0)
             
-            asset_initial_value = initial_value * float(asset.percentage) / 100
+            # Используем units если есть (учёт нескольких взносов)
+            units = float(asset.units or 0)
+            if units <= 0:
+                # Fallback для старых портфелей
+                asset_initial_value = total_invested * float(asset.percentage) / 100
+                if asset.initial_price and current_price:
+                    units = asset_initial_value / float(asset.initial_price)
+                else:
+                    units = 0
             
-            if asset.initial_price and current_price:
-                units = asset_initial_value / float(asset.initial_price)
-                asset_current_value = units * current_price
-            else:
-                asset_current_value = asset_initial_value
+            # Коррекция DCA: портфель создан с полной суммой, показываем только внесённое
+            units = units * units_scale
+            asset_current_value = units * current_price if current_price else 0
+            asset_initial_value = total_invested * float(asset.percentage) / 100
             
             total_value += asset_current_value
             
@@ -68,11 +137,11 @@ class PortfolioAnalyzer:
                 'profit_loss_percent': profit_loss_percent,
             })
         
-        profit_loss = total_value - initial_value
-        profit_loss_percent = (profit_loss / initial_value * 100) if initial_value > 0 else 0
+        profit_loss = total_value - total_invested
+        profit_loss_percent = (profit_loss / total_invested * 100) if total_invested > 0 else 0
         
         return {
-            'initial_value': initial_value,
+            'initial_value': total_invested,
             'current_value': total_value,
             'profit_loss': profit_loss,
             'profit_loss_percent': profit_loss_percent,
@@ -85,12 +154,11 @@ class PortfolioAnalyzer:
         Просадка = (пиковое значение - текущее значение) / пиковое значение * 100
         """
         value_data = self.get_current_value()
-        initial_value = value_data['initial_value']
+        total_invested = value_data['initial_value']
         current_value = value_data['current_value']
         
-        # Для MVP используем начальную стоимость как пиковую
-        # В полной версии нужно хранить историю и находить реальный пик
-        peak_value = max(initial_value, current_value)
+        # Для MVP используем максимальное из (вложено, текущее) как пик
+        peak_value = max(total_invested, current_value)
         
         if current_value >= peak_value:
             drawdown = 0
@@ -282,9 +350,14 @@ class AIAdvisorService:
             
             profit_emoji = "📈" if value_data['profit_loss'] >= 0 else "📉"
             
+            contributions_note = ""
+            contributions_count = portfolio.contributions.count()
+            if contributions_count > 0:
+                contributions_note = f"\n• Взносов внесено: {contributions_count} (портфель растёт по мере DCA)"
+            
             prompt += f"""
 ═══════════════════════════════════════
-ТЕКУЩИЙ ПОРТФЕЛЬ:
+ТЕКУЩИЙ ПОРТФЕЛЬ (АКТУАЛЬНЫЕ ДАННЫЕ):
 ═══════════════════════════════════════
 • Название: {portfolio.name}
 • Дата начала: {portfolio.start_date}
@@ -294,11 +367,11 @@ class AIAdvisorService:
 • Дней осталось: {time_data['days_remaining']}
 • Прогресс: {time_data['progress_percent']:.1f}%
 
-💰 ФИНАНСЫ:
-• Начальная сумма: ${value_data['initial_value']:,.2f}
+💰 ФИНАНСЫ (с учётом всех внесённых взносов):
+• Всего вложено: ${value_data['initial_value']:,.2f}
 • Текущая стоимость: ${value_data['current_value']:,.2f}
 • Прибыль/убыток: {profit_emoji} ${value_data['profit_loss']:+,.2f} ({value_data['profit_loss_percent']:+.1f}%)
-• Текущая просадка: {drawdown_data['current_drawdown']:.1f}%
+• Текущая просадка: {drawdown_data['current_drawdown']:.1f}%{contributions_note}
 
 📊 СОСТАВ ПОРТФЕЛЯ:
 {assets_str}
@@ -326,7 +399,7 @@ class AIAdvisorService:
         price_data = self.price_service.get_prices_with_changes(all_symbols)
         
         # Отладочный вывод
-        print(f"[DEBUG] Загружены цены для {len(price_data)} монет: {list(price_data.keys())}")
+        logger.debug("Загружены цены для %d монет: %s", len(price_data), list(price_data.keys()))
         
         if not price_data:
             return """
@@ -359,6 +432,131 @@ class AIAdvisorService:
 """
         
         return context
+    
+    def get_market_forecast_6m(self) -> Dict:
+        """
+        Прогноз крипторынка на 6 месяцев вперёд.
+        Возвращает 3 сценария: позитивный, негативный, базовый с вероятностями.
+        """
+        market_context = self.get_market_context()
+        
+        portfolio_desc = (
+            "BTC 50%, ETH 30%, USDT 10%, BNB 2%, XRP 2%, SOL 2%, DOGE 2%, ADA 2%"
+        )
+        prompt = f"""Ты — крипто-консультант. Проанализируй текущую ситуацию на крипторынке и дай прогноз на 6 месяцев вперёд.
+
+{market_context}
+
+Сформируй 3 сценария развития крипторынка на ближайшие 6 месяцев. Вероятности должны в сумме давать 100%.
+
+Затем определи сценарий с НАИБОЛЬШЕЙ вероятностью и опиши, как будет вести себя базовый портфель ({portfolio_desc}) спустя полгода при этом сценарии.
+
+Ответь СТРОГО в формате JSON (без markdown, без пояснений):
+{{
+  "positive": {{
+    "description": "Краткое описание позитивного сценария (2-3 предложения): рост рынка, факторы, ожидаемая динамика",
+    "probability": число от 0 до 100
+  }},
+  "negative": {{
+    "description": "Краткое описание негативного сценария (2-3 предложения): падение, риски, возможные причины",
+    "probability": число от 0 до 100
+  }},
+  "base": {{
+    "description": "Краткое описание базового сценария (2-3 предложения): боковое движение, умеренная волатильность",
+    "probability": число от 0 до 100
+  }},
+  "portfolio_outlook": {{
+    "most_likely_scenario": "positive" или "negative" или "base",
+    "description": "Как будет вести себя портфель спустя 6 месяцев при наиболее вероятном сценарии: ожидаемая динамика стоимости, поведение активов, риски и возможности (3-5 предложений)"
+  }}
+}}
+
+Важно: probability для positive + negative + base = 100. most_likely_scenario должен соответствовать сценарию с максимальной вероятностью. Отвечай только валидным JSON."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Ты — крипто-консультант. Отвечай только валидным JSON без markdown."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1200,
+                temperature=0.5,
+            )
+            
+            text = response.choices[0].message.content.strip()
+            # Убираем markdown-обёртку если есть
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(lines[1:-1]) if lines[0].strip().startswith("```json") else "\n".join(lines[1:-1])
+            data = json.loads(text)
+            
+            # Нормализуем вероятности
+            total = (
+                float(data.get("positive", {}).get("probability", 0)) +
+                float(data.get("negative", {}).get("probability", 0)) +
+                float(data.get("base", {}).get("probability", 0))
+            )
+            if total > 0:
+                for key in ("positive", "negative", "base"):
+                    if key in data and "probability" in data[key]:
+                        data[key]["probability"] = round(
+                            float(data[key]["probability"]) / total * 100, 1
+                        )
+            
+            result = {
+                "positive": data.get("positive", {"description": "", "probability": 0}),
+                "negative": data.get("negative", {"description": "", "probability": 0}),
+                "base": data.get("base", {"description": "", "probability": 0}),
+            }
+            # Добавляем прогноз портфеля (Этап 2)
+            po = data.get("portfolio_outlook", {})
+            if po:
+                result["portfolio_outlook"] = {
+                    "most_likely_scenario": po.get("most_likely_scenario", "base"),
+                    "description": po.get("description", ""),
+                }
+            else:
+                # Определяем наиболее вероятный сценарий по данным
+                scenarios = [
+                    ("positive", result["positive"]["probability"]),
+                    ("negative", result["negative"]["probability"]),
+                    ("base", result["base"]["probability"]),
+                ]
+                most_likely = max(scenarios, key=lambda x: x[1])[0]
+                result["portfolio_outlook"] = {
+                    "most_likely_scenario": most_likely,
+                    "description": (
+                        "При наиболее вероятном сценарии портфель может показать "
+                        "умеренную динамику. Рекомендуется придерживаться стратегии DCA "
+                        "и не реагировать на краткосрочную волатильность."
+                    ),
+                }
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка get_market_forecast_6m: {e}")
+            return {
+                "positive": {
+                    "description": "Рост рынка на фоне институционального спроса и халвинга BTC.",
+                    "probability": 35.0,
+                },
+                "negative": {
+                    "description": "Коррекция из-за макроэкономических факторов и фиксации прибыли.",
+                    "probability": 30.0,
+                },
+                "base": {
+                    "description": "Боковое движение в диапазоне с умеренной волатильностью.",
+                    "probability": 35.0,
+                },
+                "portfolio_outlook": {
+                    "most_likely_scenario": "base",
+                    "description": (
+                        "При базовом сценарии (боковое движение) портфель BTC/ETH/альтов "
+                        "может сохранить стоимость с умеренной волатильностью. "
+                        "Стейблкоины обеспечат стабильность. Рекомендуется продолжать DCA."
+                    ),
+                },
+            }
     
     def process_quick_command(self, command: str) -> Optional[str]:
         """Обработать быструю команду."""
@@ -583,7 +781,7 @@ class AIAdvisorService:
     
     def get_rebalance_suggestion(self, session_id: str) -> str:
         """
-        Генерирует предложение по ребалансировке портфеля.
+        Генерирует предложение по реструктуризации портфеля.
         Возвращает структурированный ответ с JSON-данными для модального окна.
         """
         import json
@@ -594,7 +792,7 @@ class AIAdvisorService:
         ).first()
         
         if not portfolio:
-            return "У вас пока нет активного портфеля. Создайте портфель, чтобы получать рекомендации по ребалансировке."
+            return "У вас пока нет активного портфеля. Создайте портфель, чтобы получать рекомендации по реструктуризации."
         
         # Получаем текущие активы (конвертируем Decimal в float для JSON)
         current_assets = [
@@ -610,15 +808,19 @@ class AIAdvisorService:
         analyzer = PortfolioAnalyzer(portfolio)
         value_data = analyzer.get_current_value()
         
-        # Формируем промпт для AI с просьбой предложить ребалансировку
-        rebalance_prompt = f"""Проанализируй текущий портфель и предложи оптимальную ребалансировку.
+        # Формируем промпт для AI с просьбой предложить реструктуризацию
+        rebalance_prompt = f"""Проанализируй текущий портфель и предложи оптимальную реструктуризацию.
 
 ТЕКУЩИЙ СОСТАВ ПОРТФЕЛЯ:
 {json.dumps(current_assets, ensure_ascii=False, indent=2)}
 
+ВАЖНО: Реструктуризация требует уплаты комиссий за продажу, покупку и конвертацию активов.
+Рекомендуй реструктуризацию ТОЛЬКО при значительных изменениях на крипторынке (резкий сдвиг капитализации, выход новых лидеров, серьёзные макро-события).
+При незначительных отклонениях от целевого распределения — рекомендуй держать текущий состав или докупать при следующем DCA-взносе.
+
 ТРЕБОВАНИЯ К ОТВЕТУ:
 1. Проанализируй текущее распределение и рыночную ситуацию
-2. Предложи новое распределение активов (сумма процентов = 100%)
+2. Предложи новое распределение активов (сумма процентов = 100%) — только если изменения на рынке существенны
 3. Объясни причины изменений
 4. В КОНЦЕ ответа ОБЯЗАТЕЛЬНО добавь блок с JSON в формате:
 
@@ -659,9 +861,9 @@ class AIAdvisorService:
             return response.choices[0].message.content
             
         except Exception as e:
-            logger.error(f"Ошибка OpenAI API при ребалансировке: {e}")
+            logger.error(f"Ошибка OpenAI API при реструктуризации: {e}")
             return (
-                "Извините, произошла ошибка при анализе портфеля для ребалансировки. "
+                "Извините, произошла ошибка при анализе портфеля для реструктуризации. "
                 "Пожалуйста, попробуйте позже."
             )
     

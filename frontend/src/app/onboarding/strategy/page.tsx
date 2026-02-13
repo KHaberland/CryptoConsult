@@ -1,226 +1,210 @@
 'use client'
 
-import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useSessionStore } from '@/store/sessionStore'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
-import { 
-  ArrowLeft, 
-  Target, 
-  Wallet, 
-  PieChart, 
-  Shuffle, 
-  Calendar, 
-  Eye, 
-  Diamond, 
-  LogOut,
-  TrendingUp,
-  XCircle
-} from 'lucide-react'
+import { ArrowLeft, Building2, Compass, ClipboardList, Info, ChevronRight } from 'lucide-react'
 
-const STRATEGY_STEPS = [
+const PRINCIPLES = [
   {
-    icon: Target,
-    title: 'Цели и горизонты',
-    description: 'На какой срок вы планируете инвестировать и какой уровень просадки готовы выдержать?',
-    color: 'bg-blue-100 text-blue-600',
+    num: '1',
+    title: 'Основа — крупнейшие активы',
+    text: 'Большая часть портфеля формируется из устойчивых криптовалют с высокой капитализацией. Это снижает общий риск.',
   },
   {
-    icon: Wallet,
-    title: 'Ваш капитал',
-    description: 'Сколько вы можете вложить безопасно, не затрагивая финансовую подушку?',
-    color: 'bg-green-100 text-green-600',
+    num: '2',
+    title: 'Ограниченная доля более рискованных проектов',
+    text: 'Небольшая часть выделяется на перспективные активы с потенциалом роста, но без чрезмерной концентрации.',
   },
   {
-    icon: PieChart,
-    title: 'Портфель устойчивых активов',
-    description: 'Основу портфеля составляют надёжные криптовалюты (например, Bitcoin), на которые может приходиться 50% и более. Небольшая часть выделяется на перспективные проекты с более высоким потенциалом роста.',
-    color: 'bg-purple-100 text-purple-600',
+    num: '3',
+    title: 'Постепенный вход (DCA)',
+    text: 'Инвестирование равными частями во времени снижает риск покупки на пике рынка.',
   },
   {
-    icon: Shuffle,
-    title: 'Диверсификация и стабильность',
-    description: 'Не концентрируйте всё в одном активе; часть средств можно держать в стейблкоинах для снижения волатильности.',
-    color: 'bg-orange-100 text-orange-600',
+    num: '4',
+    title: 'Диверсификация',
+    text: 'Средства распределяются между несколькими активами, чтобы уменьшить влияние одного негативного события.',
   },
   {
-    icon: Calendar,
-    title: 'Регулярные инвестиции (DCA)',
-    description: 'Вход в рынок осуществляется постепенно, равными долями, без попыток поймать краткосрочные пики и падения.',
-    color: 'bg-teal-100 text-teal-600',
-  },
-  {
-    icon: Eye,
-    title: 'Следим, но без паники',
-    description: 'Портфель пересматривается только при значимых рыночных или фундаментальных изменениях.',
-    color: 'bg-indigo-100 text-indigo-600',
-  },
-  {
-    icon: Diamond,
-    title: 'Следуем плану',
-    description: 'Дисциплина важнее хайпа — мы поможем придерживаться стратегии и не реагировать на шум.',
-    color: 'bg-pink-100 text-pink-600',
-  },
-  {
-    icon: LogOut,
+    num: '5',
     title: 'План выхода',
-    description: 'Заранее определяем условия частичной продажи или ребалансировки, чтобы принимать решения спокойно и обдуманно.',
-    color: 'bg-red-100 text-red-600',
+    text: 'Заранее определяются условия частичной фиксации прибыли или реструктуризации портфеля.',
   },
+  {
+    num: '6',
+    title: 'Эмоциональная дисциплина',
+    text: 'Решения принимаются по стратегии, а не под влиянием новостей и паники.',
+  },
+]
+
+const QUESTIONNAIRE_TOPICS = [
+  'инвестиционный горизонт',
+  'допустимый уровень просадки',
+  'размер капитала',
+  'отношение к риску',
 ]
 
 export default function OnboardingStrategyPage() {
   const router = useRouter()
   const { setOnboardingCompleted } = useSessionStore()
-  const [showExitConfirm, setShowExitConfirm] = useState(false)
 
-  const handleAgree = () => {
-    // Сохраняем что onboarding пройден
+  const handleReady = () => {
     setOnboardingCompleted(true)
     router.push('/questionnaire')
   }
 
-  const handleDisagree = () => {
-    setShowExitConfirm(true)
-  }
-
-  const handleExit = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('session_id')
-      localStorage.removeItem('onboarding_completed')
-    }
-    router.push('/')
-  }
-
-  const handleBack = () => {
-    router.push('/onboarding/disclaimer')
-  }
+  const handleBack = () => router.push('/onboarding/module')
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-primary-50 via-white to-blue-50 p-4">
-      <div className="max-w-3xl mx-auto pt-8 pb-16">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <div className="flex items-center justify-center mb-4">
-            <div className="bg-primary-600 p-3 rounded-2xl">
-              <TrendingUp className="w-10 h-10 text-white" />
+      <div className="max-w-2xl mx-auto pt-8 pb-24">
+        {/* Шаг 1. Регистрация на криптобирже */}
+        <Card className="mb-6">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Building2 className="w-6 h-6 text-primary-600" />
+              <h2 className="text-xl font-bold text-gray-900">Шаг 1. Регистрация на криптобирже</h2>
             </div>
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900">
-            Инвестируйте с умом и дисциплиной
-          </h1>
-        </div>
+            <p className="text-gray-600 mb-4">
+              Чтобы инвестировать, сначала необходимо зарегистрироваться на одной из крупных криптобирж.
+            </p>
+            <div className="flex flex-wrap gap-2 mb-4">
+              <a
+                href="https://www.binance.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 bg-primary-100 text-primary-700 rounded-lg font-medium hover:bg-primary-200 transition-colors"
+              >
+                Binance
+              </a>
+              <a
+                href="https://www.coinbase.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 bg-primary-100 text-primary-700 rounded-lg font-medium hover:bg-primary-200 transition-colors"
+              >
+                Coinbase
+              </a>
+              <a
+                href="https://www.kraken.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 bg-primary-100 text-primary-700 rounded-lg font-medium hover:bg-primary-200 transition-colors"
+              >
+                Kraken
+              </a>
+              <a
+                href="https://www.bybit.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 bg-primary-100 text-primary-700 rounded-lg font-medium hover:bg-primary-200 transition-colors"
+              >
+                Bybit
+              </a>
+            </div>
+            <p className="text-gray-600 mb-3">
+              Регистрация обычно занимает от нескольких минут до нескольких часов, иногда — до нескольких дней.
+            </p>
+            <div className="bg-amber-50 rounded-lg p-4 border border-amber-100">
+              <p className="font-medium text-amber-800 mb-1">Почему?</p>
+              <p className="text-amber-700 text-sm">
+                Биржа обязана провести идентификацию личности (KYC). Это стандартная процедура: загрузка документа, 
+                подтверждение личности и иногда адреса проживания. Без этого полноценная работа с платформой невозможна.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
-        {/* Introduction */}
-        <div className="text-center mb-6">
-          <p className="text-gray-600">
-            Чтобы составить стратегию под вас, ответьте на несколько вопросов. 
-            Мы будем сопровождать вас на каждом шаге:
-          </p>
-        </div>
-
-        {/* Strategy Steps */}
-        <div className="grid gap-4 mb-8">
-          {STRATEGY_STEPS.map((step, index) => {
-            const Icon = step.icon
-            return (
-              <Card key={index} className="hover:shadow-md transition-shadow">
-                <CardContent className="py-4">
-                  <div className="flex items-start">
-                    <div className={`p-2 rounded-lg mr-4 ${step.color}`}>
-                      <Icon className="w-5 h-5" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center mb-1">
-                        <span className="text-sm font-bold text-gray-400 mr-2">
-                          {index + 1}.
-                        </span>
-                        <h3 className="font-semibold text-gray-900">
-                          {step.title}
-                        </h3>
-                      </div>
-                      <p className="text-gray-600 text-sm">
-                        {step.description}
-                      </p>
-                    </div>
+        {/* На чём основан КриптоКонсультант */}
+        <Card className="mb-6">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Compass className="w-6 h-6 text-primary-600" />
+              <h2 className="text-xl font-bold text-gray-900">На чём основан КриптоКонсультант</h2>
+            </div>
+            <p className="text-gray-600 mb-4">
+              Программа ориентирована на консервативное инвестирование. Её цель — не максимальный риск, 
+              а разумный баланс между стабильностью и ростом.
+            </p>
+            <p className="font-medium text-gray-800 mb-3">Основные принципы стратегии:</p>
+            <div className="space-y-3">
+              {PRINCIPLES.map((p) => (
+                <div key={p.num} className="flex gap-3">
+                  <span className="flex-shrink-0 w-7 h-7 rounded-full bg-primary-100 text-primary-700 font-bold text-sm flex items-center justify-center">
+                    {p.num}
+                  </span>
+                  <div>
+                    <h3 className="font-semibold text-gray-900">{p.title}</h3>
+                    <p className="text-gray-600 text-sm mt-0.5">{p.text}</p>
                   </div>
-                </CardContent>
-              </Card>
-            )
-          })}
-        </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
 
-        {/* Call to Action */}
-        <Card className="mb-8 border-green-200 bg-green-50">
-          <CardContent className="text-center">
-            <p className="text-green-800 font-medium">
-              Если вы согласны следовать консервативной стратегии инвестирования, 
-              необходимо заполнить анкету.
+        {/* Шаг 2. Заполнение анкеты */}
+        <Card className="mb-6">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 mb-4">
+              <ClipboardList className="w-6 h-6 text-primary-600" />
+              <h2 className="text-xl font-bold text-gray-900">Шаг 2. Заполнение анкеты</h2>
+            </div>
+            <p className="text-gray-600 mb-4">
+              Чтобы подобрать структуру портфеля под ваши цели, необходимо ответить на несколько простых вопросов:
+            </p>
+            <ul className="space-y-2">
+              {QUESTIONNAIRE_TOPICS.map((topic) => (
+                <li key={topic} className="flex items-center gap-2 text-gray-700">
+                  <ChevronRight className="w-4 h-4 text-primary-500 flex-shrink-0" />
+                  {topic}
+                </li>
+              ))}
+            </ul>
+            <p className="text-gray-600 mt-4">
+              На основе ваших ответов программа сформирует персональную структуру портфеля.
             </p>
           </CardContent>
         </Card>
 
-        {/* Exit Confirmation Modal */}
-        {showExitConfirm && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <Card className="max-w-md w-full">
-              <CardContent className="text-center">
-                <XCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
-                <h3 className="text-xl font-bold text-gray-900 mb-2">
-                  Вы уверены?
-                </h3>
-                <p className="text-gray-600 mb-6">
-                  Сервис работает только с консервативной стратегией инвестирования. 
-                  Вы будете перенаправлены на главную страницу.
-                </p>
-                <div className="flex gap-3">
-                  <Button 
-                    variant="secondary" 
-                    className="flex-1"
-                    onClick={() => setShowExitConfirm(false)}
-                  >
-                    Остаться
-                  </Button>
-                  <Button 
-                    variant="danger" 
-                    className="flex-1"
-                    onClick={handleExit}
-                  >
-                    Выйти
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        )}
+        {/* Важно понимать */}
+        <Card className="mb-8 border-amber-200 bg-amber-50/50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Info className="w-6 h-6 text-amber-600" />
+              <h2 className="text-xl font-bold text-gray-900">Важно понимать</h2>
+            </div>
+            <p className="text-gray-700 font-medium mb-3">Создаваемый портфель — виртуальный.</p>
+            <p className="text-gray-600 mb-3">Он:</p>
+            <ul className="space-y-1 text-gray-600 mb-4">
+              <li>• повторяет структуру вашего реального распределения</li>
+              <li>• помогает видеть баланс и стратегию</li>
+              <li>• служит инструментом планирования</li>
+            </ul>
+            <p className="text-gray-600">
+              Но он не связан с вашей биржей и никак не управляет реальными средствами.
+            </p>
+            <p className="text-gray-700 font-medium mt-3">
+              Вы принимаете инвестиционные решения самостоятельно.
+            </p>
+          </CardContent>
+        </Card>
 
-        {/* Navigation Buttons */}
+        <div className="mb-8 flex justify-center">
+          <Button onClick={handleReady} size="lg" className="w-full sm:w-auto">
+            Готовы заполнить анкету?
+            <ChevronRight className="w-4 h-4 ml-2" />
+          </Button>
+        </div>
+
+        {/* Navigation */}
         <div className="flex gap-4">
-          <Button 
-            variant="secondary" 
-            onClick={handleBack}
-            className="flex items-center"
-          >
+          <Button variant="secondary" onClick={handleBack} className="flex items-center">
             <ArrowLeft className="w-4 h-4 mr-2" />
             Назад
           </Button>
-          
-          <div className="flex-1 flex gap-3">
-            <Button 
-              variant="outline"
-              className="flex-1 border-red-300 text-red-600 hover:bg-red-50"
-              onClick={handleDisagree}
-            >
-              Не согласен
-            </Button>
-            <Button 
-              className="flex-1"
-              onClick={handleAgree}
-            >
-              Согласен, заполнить анкету
-            </Button>
-          </div>
         </div>
       </div>
     </main>

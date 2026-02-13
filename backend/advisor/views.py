@@ -27,7 +27,7 @@ class ChatView(APIView):
         - /risk — анализ рисков
         - /market — ситуация на рынке
         - /drawdown — анализ просадки
-        - /rebalance — нужна ли перебалансировка
+        - /rebalance — нужна ли реструктуризация
         - /dca — когда делать следующую покупку
         - /exit — стоит ли фиксировать прибыль
         """
@@ -282,6 +282,35 @@ class DrawdownAlertView(APIView):
         except ValueError as e:
             return Response(
                 {'detail': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class MarketForecastView(APIView):
+    """Прогноз крипторынка на 6 месяцев (3 сценария)."""
+    permission_classes = (AllowAny,)
+    
+    def get(self, request):
+        """
+        Получить анализ крипторынка на 6 месяцев вперёд.
+        
+        Возвращает 3 сценария с вероятностями:
+        - positive: позитивный сценарий
+        - negative: негативный сценарий
+        - base: базовый сценарий
+        """
+        try:
+            advisor = AIAdvisorService()
+            forecast = advisor.get_market_forecast_6m()
+            return Response(forecast)
+        except ValueError as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:
+            return Response(
+                {'detail': 'Не удалось получить прогноз рынка.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

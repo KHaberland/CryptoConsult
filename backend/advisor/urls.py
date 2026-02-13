@@ -6,6 +6,7 @@ from .views import (
     RiskAnalysisView,
     DrawdownAlertView,
     QuickCommandsView,
+    MarketForecastView,
 )
 
 urlpatterns = [
@@ -20,4 +21,7 @@ urlpatterns = [
     
     # Справка
     path('commands/', QuickCommandsView.as_view(), name='quick_commands'),
+    
+    # Прогноз рынка на 6 месяцев
+    path('forecast/', MarketForecastView.as_view(), name='market_forecast'),
 ]

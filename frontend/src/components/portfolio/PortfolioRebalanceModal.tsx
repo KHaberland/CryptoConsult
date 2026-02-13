@@ -123,18 +123,25 @@ export function PortfolioRebalanceModal({
   }
 
   // Экран подтверждения
-  return (
+    return (
     <Modal
       isOpen={isOpen}
       onClose={handleClose}
-      title="Изменение портфеля"
+      title="Реструктуризация портфеля"
       size="xl"
       closeOnOverlayClick={false}
     >
       <div>
         <p className="text-gray-600 mb-4">
-          Вы хотите переформатировать свой портфель?
+          Рекомендуемый состав портфеля по результатам анализа. Принять изменения?
         </p>
+
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+          <p className="text-sm text-amber-800">
+            ⚠️ Изменение структуры портфеля требует уплаты комиссий за продажу, покупку и конвертацию активов.
+            Реструктурируйте портфель только в случае значительных изменений на крипторынке.
+          </p>
+        </div>
 
         {error && (
           <Alert variant="error" className="mb-4">
@@ -173,10 +180,10 @@ export function PortfolioRebalanceModal({
           </div>
 
 
-          {/* Новый портфель */}
+          {/* Рекомендуемый портфель */}
           <div className="bg-primary-50 rounded-lg p-4 border-2 border-primary-200">
             <h3 className="text-sm font-medium text-primary-700 mb-3">
-              Новый портфель
+              Рекомендуемый состав
             </h3>
             <table className="w-full">
               <tbody>
@@ -231,7 +238,7 @@ export function PortfolioRebalanceModal({
             onClick={handleClose}
             disabled={isLoading}
           >
-            Нет
+            Отклонить
           </Button>
           <Button
             onClick={handleConfirm}
@@ -240,10 +247,10 @@ export function PortfolioRebalanceModal({
             {isLoading ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Сохраняем...
+                Применяем...
               </>
             ) : (
-              'Да, изменить'
+              'Принять'
             )}
           </Button>
         </ModalFooter>

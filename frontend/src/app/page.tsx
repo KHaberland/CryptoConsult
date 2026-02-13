@@ -1,16 +1,9 @@
 'use client'
 
-import { useRouter } from 'next/navigation'
-import { Button } from '@/components/ui/Button'
+import Link from 'next/link'
 import { TrendingUp, Shield, BarChart3, MessageCircle, ArrowRight } from 'lucide-react'
 
 export default function Home() {
-  const router = useRouter()
-  
-  const handleStart = () => {
-    router.push('/login')
-  }
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 via-white to-blue-50">
       {/* Hero Section */}
@@ -71,13 +64,13 @@ export default function Home() {
         
         {/* CTA */}
         <div className="text-center">
-          <Button
-            onClick={handleStart}
-            className="px-8 py-4 text-lg"
+          <Link
+            href="/login"
+            className="inline-flex items-center justify-center font-medium rounded-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500 px-8 py-4 text-lg"
           >
             Начать
             <ArrowRight className="w-5 h-5 ml-2" />
-          </Button>
+          </Link>
           
           <p className="mt-4 text-sm text-gray-500">
             Без регистрации • MVP версия

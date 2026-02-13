@@ -13,6 +13,12 @@ interface Asset {
   profit_loss_percent: number
 }
 
+interface Contribution {
+  id: number
+  amount: number
+  contributed_at: string
+}
+
 interface PortfolioValue {
   portfolio_id: number
   portfolio_name: string
@@ -26,6 +32,7 @@ interface PortfolioValue {
   days_active: number
   days_remaining: number
   assets: Asset[]
+  contributions?: Contribution[]
 }
 
 interface InvestorProfile {
@@ -55,6 +62,8 @@ interface PortfolioState {
   createProfile: (data: Omit<InvestorProfile, 'id'>) => Promise<void>
   fetchPortfolioValue: (force?: boolean) => Promise<void>
   createPortfolio: (data: { name: string; initial_amount: number; target_years: number; experience_level?: string }) => Promise<void>
+  contribute: (amount: number) => Promise<void>
+  withdraw: (assets: Array<{ symbol: string; units_to_sell: number }>) => Promise<void>
   clearError: () => void
 }
 
@@ -153,11 +162,36 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
     set({ isLoading: true, error: null })
     try {
       await portfolioApi.create({ ...data, use_default_assets: true, experience_level: data.experience_level })
-      // После создания загружаем данные (force = true)
       const value = await portfolioApi.getValue()
       set({ portfolioValue: value, hasPortfolio: true, isLoading: false, lastFetchTime: Date.now() })
     } catch (error: any) {
       const message = error.response?.data?.detail || 'Ошибка создания портфеля'
+      set({ error: message, isLoading: false })
+      throw error
+    }
+  },
+
+  contribute: async (amount: number) => {
+    set({ isLoading: true, error: null })
+    try {
+      await portfolioApi.contribute(amount)
+      const value = await portfolioApi.getValue()
+      set({ portfolioValue: value, isLoading: false, lastFetchTime: Date.now() })
+    } catch (error: any) {
+      const message = error.response?.data?.detail || 'Ошибка внесения взноса'
+      set({ error: message, isLoading: false })
+      throw error
+    }
+  },
+
+  withdraw: async (assets: Array<{ symbol: string; units_to_sell: number }>) => {
+    set({ isLoading: true, error: null })
+    try {
+      await portfolioApi.withdraw(assets)
+      const value = await portfolioApi.getValue()
+      set({ portfolioValue: value, isLoading: false, lastFetchTime: Date.now() })
+    } catch (error: any) {
+      const message = error.response?.data?.detail || 'Ошибка вывода средств'
       set({ error: message, isLoading: false })
       throw error
     }

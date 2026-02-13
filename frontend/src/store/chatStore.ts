@@ -16,7 +16,7 @@ interface Alert {
   max_drawdown?: number
 }
 
-// Интерфейс для предложения ребалансировки
+// Интерфейс для предложения реструктуризации
 export interface RebalanceSuggestion {
   show: boolean
   newAssets: Array<{

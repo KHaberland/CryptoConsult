@@ -3,6 +3,12 @@
 import os
 import sys
 
+# Исправление кодировки для Windows: консоль по умолчанию cp1252 не поддерживает кириллицу
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 
 def main():
     """Run administrative tasks."""

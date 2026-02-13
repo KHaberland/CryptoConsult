@@ -143,9 +143,15 @@ export default function CreatePortfolioPage() {
     setError(null)
     
     try {
+      // При DCA — вкладываем только первую часть, остальное по мере взносов
+      const parts = profile.use_dca ? (profile.experience_level === 'beginner' ? 3 : (profile.dca_parts ?? 4)) : 1
+      const initialAmount = parts > 1
+        ? Math.round((Number(profile.investment_amount) / parts) * 100) / 100
+        : Number(profile.investment_amount)
+      
       await portfolioApi.create({
         name: 'Мой портфель',
-        initial_amount: Number(profile.investment_amount),
+        initial_amount: initialAmount,
         target_years: profile.investment_horizon,
         use_default_assets: false,
         custom_assets: assets.map(a => ({

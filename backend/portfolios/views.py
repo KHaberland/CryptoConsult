@@ -4,12 +4,13 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from datetime import date
 
-from .models import Portfolio, PortfolioAsset
+from .models import Portfolio, PortfolioAsset, PortfolioContribution
 from .serializers import (
     PortfolioSerializer,
     PortfolioCreateSerializer,
 )
 from .services import PriceService
+from advisor.services import PortfolioAnalyzer
 
 
 class PortfolioListCreateView(APIView):
@@ -119,81 +120,53 @@ class PortfolioValueView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Получаем активы
-        assets = portfolio.assets.all()
-        symbols = [asset.symbol for asset in assets]
+        analyzer = PortfolioAnalyzer(portfolio)
+        value_data = analyzer.get_current_value()
         
-        # Получаем текущие цены с изменениями
-        price_service = PriceService()
-        price_data = price_service.get_prices_with_changes(symbols)
-        
-        # Рассчитываем стоимость
-        initial_value = float(portfolio.initial_amount)
-        total_value = 0
+        # Форматируем активы
         assets_data = []
-        
-        for asset in assets:
-            symbol_data = price_data.get(asset.symbol, {})
-            current_price = symbol_data.get('price', 0)
-            change_24h = symbol_data.get('change_24h', 0)
-            
-            asset_initial_value = initial_value * float(asset.percentage) / 100
-            
-            # Если есть начальная цена, рассчитываем реальную стоимость
-            if asset.initial_price and current_price:
-                # Количество единиц актива
-                units = asset_initial_value / float(asset.initial_price)
-                asset_current_value = units * current_price
-            else:
-                # Если нет начальной цены, показываем начальное распределение
-                asset_current_value = asset_initial_value
-            
-            total_value += asset_current_value
-            
-            profit_loss = asset_current_value - asset_initial_value
-            profit_loss_percent = (
-                (profit_loss / asset_initial_value * 100)
-                if asset_initial_value > 0 else 0
-            )
-            
+        for asset in value_data['assets']:
             assets_data.append({
-                'symbol': asset.symbol,
-                'name': asset.name,
-                'percentage': float(asset.percentage),
-                'initial_value': round(asset_initial_value, 2),
-                'current_value': round(asset_current_value, 2),
-                'initial_price': float(asset.initial_price) if asset.initial_price else None,
-                'current_price': current_price,
-                'change_24h': round(change_24h, 2),
-                'profit_loss': round(profit_loss, 2),
-                'profit_loss_percent': round(profit_loss_percent, 2),
+                'symbol': asset['symbol'],
+                'name': asset['name'],
+                'percentage': float(asset['percentage']),
+                'initial_value': round(asset['initial_value'], 2),
+                'current_value': round(asset['current_value'], 2),
+                'current_price': asset['current_price'],
+                'change_24h': round(asset['change_24h'], 2),
+                'profit_loss': round(asset['profit_loss'], 2),
+                'profit_loss_percent': round(asset['profit_loss_percent'], 2),
             })
         
-        # Расчёт общей прибыли/убытка
-        profit_loss = total_value - initial_value
-        profit_loss_percent = (profit_loss / initial_value * 100) if initial_value > 0 else 0
+        # Список взносов
+        contributions = [
+            {
+                'id': c.id,
+                'amount': float(c.amount),
+                'contributed_at': c.contributed_at,
+            }
+            for c in portfolio.contributions.all().order_by('contributed_at')
+        ]
         
-        # Дней до целевой даты
         today = date.today()
         target_date = portfolio.target_date
         days_remaining = (target_date - today).days if target_date > today else 0
-        
-        # Дней с начала
         days_active = (today - portfolio.start_date).days
         
         response_data = {
             'portfolio_id': portfolio.id,
             'portfolio_name': portfolio.name,
-            'total_value': round(total_value, 2),
-            'initial_value': round(initial_value, 2),
-            'profit_loss': round(profit_loss, 2),
-            'profit_loss_percent': round(profit_loss_percent, 2),
+            'total_value': round(value_data['current_value'], 2),
+            'initial_value': round(value_data['initial_value'], 2),
+            'profit_loss': round(value_data['profit_loss'], 2),
+            'profit_loss_percent': round(value_data['profit_loss_percent'], 2),
             'start_date': portfolio.start_date,
             'target_date': target_date,
             'target_years': portfolio.target_years,
             'days_active': days_active,
             'days_remaining': days_remaining,
             'assets': assets_data,
+            'contributions': contributions,
         }
         
         return Response(response_data)
@@ -220,13 +193,255 @@ class ActivePortfolioView(APIView):
         return Response(serializer.data)
 
 
+class ContributePortfolioView(APIView):
+    """Внесение взноса в портфель (DCA)."""
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        """
+        Внести взнос в активный портфель.
+
+        Body:
+            amount: сумма взноса в USD (например 1666)
+        """
+        portfolio = Portfolio.objects.filter(
+            session_id=request.session_id,
+            is_active=True
+        ).first()
+
+        if not portfolio:
+            return Response(
+                {'detail': 'Активный портфель не найден.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            amount = float(request.data.get('amount', 0))
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'Укажите корректную сумму взноса.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if amount <= 0:
+            return Response(
+                {'detail': 'Сумма взноса должна быть больше нуля.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Создаём запись о взносе
+        contribution = PortfolioContribution.objects.create(
+            portfolio=portfolio,
+            amount=amount
+        )
+
+        # Получаем текущие цены
+        assets = portfolio.assets.all()
+        symbols = [asset.symbol for asset in assets]
+        price_service = PriceService()
+        current_prices = price_service.get_prices(symbols)
+
+        # Добавляем units к каждому активу
+        for asset in assets:
+            pct = float(asset.percentage)
+            asset_value = amount * pct / 100
+            price = current_prices.get(asset.symbol, 0) or float(asset.initial_price or 0)
+            new_units = (asset_value / price) if price else 0
+
+            if new_units > 0:
+                old_units = float(asset.units or 0)
+                if old_units <= 0:
+                    # Инициализация для старых портфелей: units из initial_amount
+                    init_val = float(portfolio.initial_amount) * pct / 100
+                    init_price = float(asset.initial_price or 0) or price
+                    old_units = (init_val / init_price) if init_price else 0
+                asset.units = old_units + new_units
+                asset.save(update_fields=['units'])
+
+        return Response({
+            'success': True,
+            'message': f'Взнос ${amount:,.2f} успешно внесён.',
+            'contribution': {
+                'id': contribution.id,
+                'amount': float(contribution.amount),
+                'contributed_at': contribution.contributed_at,
+            },
+        }, status=status.HTTP_201_CREATED)
+
+
+class WithdrawProposalView(APIView):
+    """Предложение по выводу средств (пропорционально активам)."""
+    permission_classes = (AllowAny,)
+
+    def get(self, request):
+        """
+        Получить предложение по выводу.
+
+        Query: amount — сумма в USD для вывода
+        """
+        portfolio = Portfolio.objects.filter(
+            session_id=request.session_id,
+            is_active=True
+        ).first()
+
+        if not portfolio:
+            return Response(
+                {'detail': 'Активный портфель не найден.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            amount = float(request.query_params.get('amount', 0))
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'Укажите корректную сумму вывода.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if amount <= 0:
+            return Response(
+                {'detail': 'Сумма вывода должна быть больше нуля.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        analyzer = PortfolioAnalyzer(portfolio)
+        value_data = analyzer.get_current_value()
+        total_value = value_data['current_value']
+        units_scale = analyzer.get_units_scale()
+
+        if amount > total_value:
+            return Response(
+                {'detail': f'Сумма вывода ({amount:.2f}) превышает стоимость портфеля ({total_value:.2f}).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        price_service = PriceService()
+        assets = portfolio.assets.all()
+        symbols = [a.symbol for a in assets]
+        prices = price_service.get_prices(symbols)
+
+        proposal = []
+        assets_data = value_data['assets']
+        for i, asset in enumerate(assets_data):
+            symbol = asset['symbol']
+            current_value = asset['current_value']
+            current_price = asset['current_price'] or prices.get(symbol, 0) or 0
+
+            # units = current_value / price
+            units_current = (current_value / current_price) if current_price else 0
+
+            # Пропорциональная доля вывода
+            share = (current_value / total_value) if total_value > 0 else 0
+            value_to_sell = amount * share
+            # Последний актив: корректируем для точной суммы (устраняет погрешности округления)
+            if i == len(assets_data) - 1 and len(proposal) > 0:
+                allocated = sum(p['value_usd'] for p in proposal)
+                value_to_sell = max(0, min(amount - allocated, current_value))
+
+            # units_to_sell — в RAW (для вычета из БД). При DCA scale < 1 display_units = raw * scale
+            units_to_sell = (value_to_sell / current_price) if current_price else 0
+            if units_scale > 0 and units_scale < 1:
+                units_to_sell = units_to_sell / units_scale
+            units_current_raw = units_current / units_scale if (units_scale > 0 and units_scale < 1) else units_current
+            units_to_sell = min(units_to_sell, units_current_raw)
+
+            # value_usd — сумма к выводу (для отображения пользователю), не units*price при scale
+            value_usd = round(value_to_sell, 2)
+
+            proposal.append({
+                'symbol': symbol,
+                'name': asset['name'],
+                'units_current': round(units_current_raw, 8),
+                'units_to_sell': round(units_to_sell, 8),
+                'current_price': current_price,
+                'value_usd': value_usd,
+            })
+
+        return Response({
+            'amount': amount,
+            'assets': proposal,
+            'total_value': round(total_value, 2),
+        })
+
+
+class WithdrawPortfolioView(APIView):
+    """Выполнение вывода средств из портфеля."""
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        """
+        Вывести средства из портфеля.
+
+        Body:
+            assets: [
+                { "symbol": "BTC", "units_to_sell": 0.01 },
+                ...
+            ]
+        """
+        portfolio = Portfolio.objects.filter(
+            session_id=request.session_id,
+            is_active=True
+        ).first()
+
+        if not portfolio:
+            return Response(
+                {'detail': 'Активный портфель не найден.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        assets_data = request.data.get('assets', [])
+        if not assets_data:
+            return Response(
+                {'detail': 'Укажите активы для вывода.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        price_service = PriceService()
+        assets_by_symbol = {a.symbol: a for a in portfolio.assets.all()}
+        prices = price_service.get_prices(list(assets_by_symbol.keys()))
+
+        for item in assets_data:
+            symbol = item.get('symbol', '').upper()
+            try:
+                units_to_sell = float(item.get('units_to_sell', 0))
+            except (TypeError, ValueError):
+                units_to_sell = 0
+
+            if units_to_sell <= 0:
+                continue
+
+            asset = assets_by_symbol.get(symbol)
+            if not asset:
+                continue
+
+            units_current = float(asset.units or 0)
+            if units_current <= 0:
+                # Fallback для старых портфелей (как в PortfolioAnalyzer)
+                asset_val = float(portfolio.initial_amount) * float(asset.percentage) / 100
+                init_price = float(asset.initial_price or 0) or prices.get(symbol, 0)
+                units_current = (asset_val / init_price) if init_price else 0
+
+            units_to_sell = min(units_to_sell, units_current)
+            if units_to_sell <= 0:
+                continue
+
+            new_units = units_current - units_to_sell
+            asset.units = max(0, new_units)
+            asset.save(update_fields=['units'])
+
+        return Response({
+            'success': True,
+            'message': 'Вывод средств выполнен.',
+        }, status=status.HTTP_200_OK)
+
+
 class RebalancePortfolioView(APIView):
-    """Ребалансировка портфеля - обновление активов."""
+    """Реструктуризация портфеля - обновление активов."""
     permission_classes = (AllowAny,)
     
     def post(self, request):
         """
-        Обновить активы портфеля (ребалансировка).
+        Обновить активы портфеля (реструктуризация).
         
         Body:
             assets: [
@@ -262,40 +477,55 @@ class RebalancePortfolioView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Сохраняем старые initial_price, чтобы не потерять историю
-        old_initial_prices = {
-            asset.symbol: float(asset.initial_price) if asset.initial_price else None
-            for asset in portfolio.assets.all()
-        }
-        
-        # Получаем текущие цены для НОВЫХ активов
+        # Сохраняем старые initial_price и считаем текущую стоимость до реструктуризации
+        old_assets = list(portfolio.assets.all())
+        old_initial_prices = {a.symbol: float(a.initial_price) if a.initial_price else None for a in old_assets}
+
         price_service = PriceService()
+        old_symbols = [a.symbol for a in old_assets]
+        old_prices = price_service.get_prices(old_symbols)
+
+        total_value = 0
+        for a in old_assets:
+            units = float(a.units or 0)
+            if units <= 0:
+                # Fallback для старых портфелей без units
+                asset_val = float(portfolio.initial_amount) * float(a.percentage) / 100
+                price = old_prices.get(a.symbol) or float(a.initial_price or 0)
+                units = (asset_val / price) if price else 0
+            price = old_prices.get(a.symbol) or float(a.initial_price or 0)
+            total_value += units * (price or 0)
+
         symbols = [asset.get('symbol', '').upper() for asset in assets_data]
         current_prices = price_service.get_prices(symbols)
-        
+
         # Удаляем старые активы
         portfolio.assets.all().delete()
         
-        # Создаём новые активы
+        # Создаём новые активы с units
         new_assets = []
         for asset_data in assets_data:
             symbol = asset_data.get('symbol', '').upper()
             name = asset_data.get('name', symbol)
             percentage = asset_data.get('percentage', 0)
-            
-            # Для существующих активов сохраняем старую initial_price
-            # Для новых активов используем текущую цену
+            pct = float(percentage)
+
             if symbol in old_initial_prices and old_initial_prices[symbol]:
                 initial_price = old_initial_prices[symbol]
             else:
                 initial_price = current_prices.get(symbol, 0)
-            
+
+            price = current_prices.get(symbol, 0) or float(initial_price or 0)
+            asset_value = total_value * pct / 100
+            units = (asset_value / price) if price else 0
+
             asset = PortfolioAsset.objects.create(
                 portfolio=portfolio,
                 symbol=symbol,
                 name=name,
                 percentage=percentage,
-                initial_price=initial_price
+                initial_price=initial_price,
+                units=units
             )
             new_assets.append({
                 'symbol': asset.symbol,

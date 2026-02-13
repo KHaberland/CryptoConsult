@@ -62,17 +62,20 @@ export default function NewUserWelcomePage() {
             </div>
             
             <p className="text-lg text-gray-600 mb-2">
-              Похоже, вы у нас впервые.
+              Рады видеть вас.
+            </p>
+            <p className="text-gray-600 mb-4">
+              Не переживайте — мы будем рядом на каждом шаге.
             </p>
             <p className="text-gray-600 mb-8">
-              Давайте настроим ваш портфель!
+              Сначала познакомимся с крипторынком, разберём базовые понятия, а потом поможем определить ваш уровень инвестора и безопасную стратегию.
             </p>
             
             <Button
               onClick={handleStart}
               className="w-full py-4 text-lg"
             >
-              Начать настройку
+              Начать знакомство
               <ArrowRight className="w-5 h-5 ml-2" />
             </Button>
           </CardContent>

@@ -10,7 +10,86 @@ import { Alert } from '@/components/ui/Alert'
 import { Progress } from '@/components/ui/Progress'
 import { Slider } from '@/components/ui/Slider'
 import { Input } from '@/components/ui/Input'
-import { CheckCircle, TrendingUp } from 'lucide-react'
+import { CheckCircle, TrendingUp, TrendingDown, Minus, Wallet, CalendarCheck } from 'lucide-react'
+import {
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
+import { chatApi } from '@/services/api'
+import { formatCurrency } from '@/lib/utils'
+import { getDcaEntriesWithCumulative } from '@/lib/dca'
+
+// Генерация данных для графика прогноза (от сегодня на 6 месяцев)
+// Паттерн волатильности на основе реального графика BTC за 6 мес (авг 2025 — фев 2026)
+// Нормализованные точки: t (0..1) -> индекс от начальной цены (100 = старт)
+// Реальный BTC: пик ~106% в мес 1.5, коррекция до ~80%, новый пик, обвал до ~53%, отскок до ~57%
+const BTC_PATTERN: Array<[number, number]> = [
+  [0, 100], [0.04, 98], [0.08, 95], [0.12, 97], [0.17, 100], [0.21, 96], [0.25, 101],
+  [0.29, 105], [0.33, 96], [0.38, 91], [0.42, 94], [0.46, 91], [0.50, 80], [0.54, 77],
+  [0.58, 74], [0.63, 75], [0.67, 76], [0.71, 80], [0.75, 77], [0.79, 75], [0.83, 74],
+  [0.88, 67], [0.92, 55], [0.96, 56], [1, 57],
+]
+
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t
+
+// Интерполяция по паттерну BTC
+const btcPatternAt = (t: number): number => {
+  if (t <= 0) return BTC_PATTERN[0][1]
+  if (t >= 1) return BTC_PATTERN[BTC_PATTERN.length - 1][1]
+  for (let i = 0; i < BTC_PATTERN.length - 1; i++) {
+    const [t0, v0] = BTC_PATTERN[i]
+    const [t1, v1] = BTC_PATTERN[i + 1]
+    if (t >= t0 && t <= t1) return lerp(v0, v1, (t - t0) / (t1 - t0))
+  }
+  return 100
+}
+
+// Масштабирование паттерна BTC под сценарий: start=100, end=targetEnd
+const scalePattern = (t: number, targetEnd: number): number => {
+  const raw = btcPatternAt(t)
+  // Паттерн идёт 100 -> 57. Масштабируем в 100 -> targetEnd
+  const progress = (raw - 100) / (57 - 100)
+  return 100 + progress * (targetEnd - 100)
+}
+
+type ChartPoint = {
+  month: string
+  base: number
+  positive: number
+  negative: number
+  mostProbable: number
+}
+
+const generateForecastChartData = (
+  mostLikely: 'positive' | 'negative' | 'base'
+): ChartPoint[] => {
+  const today = new Date()
+  const points: ChartPoint[] = []
+  const steps = 24
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps
+    const d = new Date(today)
+    d.setDate(d.getDate() + Math.round((180 * i) / steps))
+    const monthStr = d.toLocaleDateString('ru-RU', { month: 'short', day: 'numeric' })
+    // Позитивный: паттерн BTC, но масштаб 100 -> 138
+    const positive = scalePattern(t, 138)
+    // Негативный: паттерн BTC, масштаб 100 -> 72
+    const negative = scalePattern(t, 72)
+    // Базовый: паттерн BTC, масштаб 100 -> 102 (боковик с волатильностью)
+    const base = scalePattern(t, 102)
+    const mostProbable = mostLikely === 'positive' ? positive : mostLikely === 'negative' ? negative : base
+    points.push({ month: monthStr, base, positive, negative, mostProbable })
+  }
+  return points
+}
 
 // Динамические AI-комментарии для горизонта инвестирования
 const getHorizonComment = (years: number): string => {
@@ -282,13 +361,21 @@ const QUESTIONS = [
     id: 'use_default_portfolio',
     title: 'Состав портфеля',
     question: 'Хотите использовать базовый портфель?',
-    comment: 'Базовый портфель: BTC 50%, ETH 25%, BNB 7.5%, SOL 7.5%, USDT 10%',
+    comment: 'Базовый портфель: BTC 50%, ETH 30%, USDT 10%, BNB (2%), XRP (2%), SOL (2%), DOGE (2%), ADA (2%)',
     type: 'boolean',
     options: [
       { value: true, label: 'Да, использовать базовый портфель' },
       { value: false, label: 'Нет, хочу настроить самостоятельно' },
     ],
     default: true,
+  },
+  {
+    id: 'market_analysis',
+    title: 'Анализ крипторынка',
+    question: 'Прогноз на 6 месяцев вперёд',
+    comment: 'На основе актуальных рыночных данных и криптоконсультанта',
+    type: 'display',
+    condition: (answers: any) => answers.use_default_portfolio === true,
   },
 ]
 
@@ -300,6 +387,16 @@ export default function QuestionnairePage() {
   const [currentStep, setCurrentStep] = useState(0)
   const [answers, setAnswers] = useState<Record<string, any>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [marketForecast, setMarketForecast] = useState<{
+    positive: { description: string; probability: number }
+    negative: { description: string; probability: number }
+    base: { description: string; probability: number }
+    portfolio_outlook?: {
+      most_likely_scenario: string
+      description: string
+    }
+  } | null>(null)
+  const [forecastLoading, setForecastLoading] = useState(false)
   
   // Инициализация сессии
   useEffect(() => {
@@ -376,6 +473,17 @@ export default function QuestionnairePage() {
   const progress = ((currentStep + 1) / visibleQuestions.length) * 100
   
   const isBeginner = answers.experience_level === 'beginner'
+  
+  // Загрузка прогноза рынка при переходе на шаг анализа
+  useEffect(() => {
+    if (currentQuestion?.id === 'market_analysis' && !marketForecast && !forecastLoading) {
+      setForecastLoading(true)
+      chatApi.getMarketForecast()
+        .then((data) => setMarketForecast(data))
+        .catch(() => setMarketForecast(null))
+        .finally(() => setForecastLoading(false))
+    }
+  }, [currentQuestion?.id, marketForecast, forecastLoading])
 
   const handleAnswer = (value: any) => {
     setAnswers((prev) => {
@@ -442,9 +550,13 @@ export default function QuestionnairePage() {
       
       // Создаём портфель только если выбран базовый
       if (answers.use_default_portfolio) {
+        const parts = answers.use_dca ? (answers.dca_parts ?? 4) : 1
+        const firstPartAmount = parts > 1
+          ? Math.round((answers.investment_amount / parts) * 100) / 100
+          : answers.investment_amount
         await createPortfolio({
           name: 'Мой портфель',
-          initial_amount: answers.investment_amount,
+          initial_amount: firstPartAmount,
           target_years: answers.investment_horizon,
           experience_level: answers.experience_level,
         })
@@ -472,6 +584,7 @@ export default function QuestionnairePage() {
   }
   
   const isLastStep = currentStep === visibleQuestions.length - 1
+  const isMarketAnalysisStep = currentQuestion?.id === 'market_analysis'
   
   // Проверка валидности текущего шага для текстовых полей
   const isCurrentStepValid = currentQuestion?.type === 'text' 
@@ -522,7 +635,259 @@ export default function QuestionnairePage() {
               </p>
             )}
             
+            {/* Окно анализа крипторынка (шаг после портфеля) */}
+            {isMarketAnalysisStep && (
+              <div className="my-6 space-y-4">
+                {forecastLoading ? (
+                  <div className="flex flex-col items-center justify-center py-12">
+                    <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-primary-600"></div>
+                    <p className="mt-3 text-gray-600">Анализ рынка криптоконсультантом...</p>
+                  </div>
+                ) : marketForecast ? (
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-lg border-2 border-green-200 bg-green-50">
+                      <div className="flex items-center gap-2 mb-2">
+                        <TrendingUp className="w-5 h-5 text-green-600" />
+                        <span className="font-semibold text-green-800">Позитивный сценарий</span>
+                        <span className="ml-auto text-sm font-medium text-green-700 bg-green-200 px-2 py-0.5 rounded">
+                          {marketForecast.positive.probability}%
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-700">{marketForecast.positive.description}</p>
+                    </div>
+                    <div className="p-4 rounded-lg border-2 border-red-200 bg-red-50">
+                      <div className="flex items-center gap-2 mb-2">
+                        <TrendingDown className="w-5 h-5 text-red-600" />
+                        <span className="font-semibold text-red-800">Негативный сценарий</span>
+                        <span className="ml-auto text-sm font-medium text-red-700 bg-red-200 px-2 py-0.5 rounded">
+                          {marketForecast.negative.probability}%
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-700">{marketForecast.negative.description}</p>
+                    </div>
+                    <div className="p-4 rounded-lg border-2 border-gray-200 bg-gray-50">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Minus className="w-5 h-5 text-gray-600" />
+                        <span className="font-semibold text-gray-800">Базовый сценарий</span>
+                        <span className="ml-auto text-sm font-medium text-gray-700 bg-gray-200 px-2 py-0.5 rounded">
+                          {marketForecast.base.probability}%
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-700">{marketForecast.base.description}</p>
+                    </div>
+                    {/* Этап 2: Прогноз портфеля на 6 месяцев */}
+                    {marketForecast.portfolio_outlook && (
+                      <div className="p-4 rounded-lg border-2 border-primary-200 bg-primary-50">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Wallet className="w-5 h-5 text-primary-600" />
+                          <span className="font-semibold text-primary-800">
+                            Ваш портфель через 6 месяцев
+                          </span>
+                          <span className="ml-auto text-xs text-primary-600">
+                            при{' '}
+                            {marketForecast.portfolio_outlook.most_likely_scenario === 'positive'
+                              ? 'позитивном'
+                              : marketForecast.portfolio_outlook.most_likely_scenario === 'negative'
+                                ? 'негативном'
+                                : 'базовом'}{' '}
+                            сценарии
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-700 whitespace-pre-line">
+                          {marketForecast.portfolio_outlook.description}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* График прогноза крипторынка (от сегодня на 6 месяцев) */}
+                    <div className="mt-6 pt-4 border-t border-gray-200">
+                      <div className="h-56 w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart
+                            data={generateForecastChartData(
+                              marketForecast.portfolio_outlook?.most_likely_scenario ?? 'base'
+                            )}
+                            margin={{ top: 5, right: 5, left: 0, bottom: 5 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                            <XAxis
+                              dataKey="month"
+                              tick={{ fontSize: 10 }}
+                              stroke="#6b7280"
+                              interval={4}
+                            />
+                            <YAxis
+                              domain={[55, 165]}
+                              tick={{ fontSize: 11 }}
+                              stroke="#6b7280"
+                              tickFormatter={(v) => `${v}%`}
+                            />
+                            <Tooltip
+                              formatter={(value: number) => [`${value.toFixed(1)}%`, '']}
+                              labelFormatter={(label) => `Месяц: ${label}`}
+                            />
+                            <Legend
+                              wrapperStyle={{ fontSize: 12 }}
+                              formatter={(value) =>
+                                value === 'mostProbable'
+                                  ? 'Наиболее вероятный'
+                                  : value === 'positive'
+                                    ? 'Позитивный рост'
+                                    : value === 'negative'
+                                      ? 'Негативный рост'
+                                      : value
+                              }
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="mostProbable"
+                              stroke="#1f2937"
+                              strokeWidth={2.5}
+                              dot={false}
+                              name="mostProbable"
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="positive"
+                              stroke="#16a34a"
+                              strokeWidth={2}
+                              dot={false}
+                              name="positive"
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="negative"
+                              stroke="#dc2626"
+                              strokeWidth={2}
+                              dot={false}
+                              name="negative"
+                            />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <p className="mt-3 text-xs text-gray-500 text-center">
+                        Прогноз ИИ — могут быть расхождения с реальной ситуацией.
+                      </p>
+                    </div>
+
+                    {/* Стоимость портфеля по графику инвестирования */}
+                    <div className="mt-6 pt-6 border-t border-gray-200">
+                      <div className="flex items-center gap-2 mb-4">
+                        <CalendarCheck className="w-5 h-5 text-primary-600" />
+                        <span className="font-semibold text-gray-900">
+                          Стоимость портфеля по графику инвестирования
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-600 mb-4">
+                        Первый вход выполнен сегодня. Ниже — нарастающая стоимость портфеля после каждого последующего входа.
+                      </p>
+                      {(() => {
+                        const parts = answers.use_dca
+                          ? (isBeginner ? 3 : (answers.dca_parts ?? 4))
+                          : 1
+                        const amount = answers.investment_amount ?? 10000
+                        const entries = getDcaEntriesWithCumulative(parts, amount, new Date()) // без asOfDate — только 1-й вход выполнен
+                        return (
+                          <div className="space-y-3">
+                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="bg-gray-50 border-b border-gray-200">
+                                    <th className="px-4 py-3 text-left font-medium text-gray-700">Вход</th>
+                                    <th className="px-4 py-3 text-left font-medium text-gray-700">Дата</th>
+                                    <th className="px-4 py-3 text-right font-medium text-gray-700">Сумма входа</th>
+                                    <th className="px-4 py-3 text-right font-medium text-gray-700">Стоимость портфеля</th>
+                                    <th className="px-4 py-3 text-center font-medium text-gray-700 w-24">Статус</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {entries.map((e) => (
+                                    <tr
+                                      key={e.entryNumber}
+                                      className={`border-b border-gray-100 last:border-0 ${
+                                        e.isDone ? 'bg-primary-50/50' : ''
+                                      }`}
+                                    >
+                                      <td className="px-4 py-3 font-medium text-gray-900">
+                                        Вход {e.entryNumber}
+                                      </td>
+                                      <td className="px-4 py-3 text-gray-700">{e.dateStr}</td>
+                                      <td className="px-4 py-3 text-right font-medium">
+                                        {formatCurrency(e.amountPerEntry)}
+                                      </td>
+                                      <td className="px-4 py-3 text-right font-semibold text-primary-600">
+                                        {formatCurrency(e.cumulativeAmount)}
+                                      </td>
+                                      <td className="px-4 py-3 text-center">
+                                        {e.isDone ? (
+                                          <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700 bg-green-100 px-2 py-1 rounded-full">
+                                            <CheckCircle className="w-3.5 h-3.5" />
+                                            Выполнено
+                                          </span>
+                                        ) : (
+                                          <span className="text-xs text-gray-500">Запланировано</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            <div className="flex items-center justify-between text-xs text-gray-500 pt-1">
+                              <span>
+                                Итого после всех входов: {formatCurrency(entries[entries.length - 1]?.cumulativeAmount ?? 0)}
+                              </span>
+                              <span>
+                                {parts} {parts === 1 ? 'вход' : parts < 5 ? 'входа' : 'входов'}
+                              </span>
+                            </div>
+                            {entries.length > 1 && (
+                              <div className="mt-4 h-40">
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <BarChart
+                                    data={entries.map((e) => ({
+                                      name: `Вход ${e.entryNumber}`,
+                                      date: e.dateStr,
+                                      cost: e.cumulativeAmount,
+                                      fill: e.isDone ? '#16a34a' : '#e5e7eb',
+                                    }))}
+                                    margin={{ top: 5, right: 5, left: 0, bottom: 5 }}
+                                  >
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                                    <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="#6b7280" />
+                                    <YAxis
+                                      tick={{ fontSize: 11 }}
+                                      stroke="#6b7280"
+                                      tickFormatter={(v) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v}`}
+                                    />
+                                    <Tooltip
+                                      formatter={(value: number) => [formatCurrency(value), 'Стоимость портфеля']}
+                                      labelFormatter={(label, payload) =>
+                                        payload?.[0]?.payload?.date ?? label
+                                      }
+                                    />
+                                    <Bar dataKey="cost" name="Стоимость" radius={[4, 4, 0, 0]} />
+                                  </BarChart>
+                                </ResponsiveContainer>
+                                <p className="text-xs text-gray-500 text-center mt-1">
+                                  Нарастающая стоимость после каждого входа
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-gray-500 text-sm py-4">Не удалось загрузить прогноз. Продолжайте.</p>
+                )}
+              </div>
+            )}
+            
             {/* Answer Input */}
+            {!isMarketAnalysisStep && (
+            <>
             <div className="my-6">
               {currentQuestion?.type === 'text' && (
                 <Input
@@ -642,6 +1007,8 @@ export default function QuestionnairePage() {
                               )
                             : currentQuestion?.comment}
             </div>
+            </>
+            )}
           </CardContent>
         </Card>
         

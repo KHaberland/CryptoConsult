@@ -5,6 +5,9 @@ from .views import (
     PortfolioDetailView,
     PortfolioValueView,
     ActivePortfolioView,
+    ContributePortfolioView,
+    WithdrawProposalView,
+    WithdrawPortfolioView,
     RebalancePortfolioView,
     # Price views
     PricesView,
@@ -19,6 +22,9 @@ urlpatterns = [
     path('', PortfolioListCreateView.as_view(), name='portfolio_list_create'),
     path('active/', ActivePortfolioView.as_view(), name='portfolio_active'),
     path('value/', PortfolioValueView.as_view(), name='portfolio_value'),
+    path('contribute/', ContributePortfolioView.as_view(), name='portfolio_contribute'),
+    path('withdraw/proposal/', WithdrawProposalView.as_view(), name='portfolio_withdraw_proposal'),
+    path('withdraw/', WithdrawPortfolioView.as_view(), name='portfolio_withdraw'),
     path('rebalance/', RebalancePortfolioView.as_view(), name='portfolio_rebalance'),
     path('<int:pk>/', PortfolioDetailView.as_view(), name='portfolio_detail'),
     

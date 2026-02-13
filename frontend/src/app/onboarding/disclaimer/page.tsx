@@ -51,7 +51,7 @@ export default function OnboardingDisclaimerPage() {
 
   const handleAgree = () => {
     if (allChecked) {
-      router.push('/onboarding/strategy')
+      router.push('/onboarding/module')
     }
   }
 

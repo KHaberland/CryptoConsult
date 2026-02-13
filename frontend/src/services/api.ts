@@ -140,6 +140,21 @@ export const portfolioApi = {
     const response = await api.post('/portfolio/rebalance/', { assets })
     return response.data
   },
+
+  contribute: async (amount: number) => {
+    const response = await api.post('/portfolio/contribute/', { amount })
+    return response.data
+  },
+
+  getWithdrawProposal: async (amount: number) => {
+    const response = await api.get('/portfolio/withdraw/proposal/', { params: { amount } })
+    return response.data
+  },
+
+  withdraw: async (assets: Array<{ symbol: string; units_to_sell: number }>) => {
+    const response = await api.post('/portfolio/withdraw/', { assets })
+    return response.data
+  },
 }
 
 // ============ Prices API ============
@@ -211,6 +226,11 @@ export const chatApi = {
   
   getCommands: async () => {
     const response = await api.get('/chat/commands/')
+    return response.data
+  },
+  
+  getMarketForecast: async () => {
+    const response = await api.get('/chat/forecast/')
     return response.data
   },
 }

@@ -102,6 +102,15 @@ class PortfolioAsset(models.Model):
         verbose_name='Цена при покупке ($)'
     )
     
+    # Количество единиц актива (для учёта нескольких взносов по разным ценам)
+    units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        null=True,
+        blank=True,
+        verbose_name='Количество единиц'
+    )
+    
     class Meta:
         verbose_name = 'Актив портфеля'
         verbose_name_plural = 'Активы портфеля'
@@ -114,6 +123,37 @@ class PortfolioAsset(models.Model):
     def initial_value(self):
         """Начальная стоимость актива в портфеле."""
         return float(self.portfolio.initial_amount) * float(self.percentage) / 100
+
+
+class PortfolioContribution(models.Model):
+    """Взнос в портфель (дополнительная покупка по DCA)."""
+    
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='contributions'
+    )
+    
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        verbose_name='Сумма взноса ($)'
+    )
+    
+    contributed_at = models.DateField(
+        auto_now_add=True,
+        verbose_name='Дата взноса'
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name = 'Взнос в портфель'
+        verbose_name_plural = 'Взносы в портфель'
+        ordering = ['contributed_at']
+    
+    def __str__(self):
+        return f'{self.amount} ({self.contributed_at})'
 
 
 # Базовый портфель по умолчанию

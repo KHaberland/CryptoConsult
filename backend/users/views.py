@@ -8,7 +8,7 @@ from datetime import date
 from .serializers import InvestorProfileSerializer
 from .models import InvestorProfile
 from portfolios.models import Portfolio
-from portfolios.services import PriceService
+from advisor.services import PortfolioAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -55,38 +55,20 @@ class ProfileLookupView(APIView):
             analysis = None
 
             if portfolio:
-                # Рассчитываем текущую стоимость (устойчиво к сбоям API цен)
-                assets = list(portfolio.assets.all())
-                symbols = [a.symbol for a in assets]
-
+                # Используем PortfolioAnalyzer — учитывает реальные units и взносы (DCA)
                 try:
-                    price_service = PriceService()
-                    price_data = price_service.get_prices(symbols)
+                    analyzer = PortfolioAnalyzer(portfolio)
+                    value_data = analyzer.get_current_value()
+                    initial_value = value_data['initial_value']
+                    current_value = value_data['current_value']
+                    profit_loss = value_data['profit_loss']
+                    profit_loss_percent = value_data['profit_loss_percent']
                 except Exception as e:
-                    logger.warning("PriceService failed in lookup, using zeros: %s", e)
-                    price_data = {}
-
-                initial_value = float(portfolio.initial_amount or 0)
-                current_value = 0.0
-
-                for asset in assets:
-                    current_price = price_data.get(asset.symbol, 0) or 0
-                    pct = float(asset.percentage or 0) / 100
-                    asset_initial_value = initial_value * pct
-
-                    if asset.initial_price and current_price:
-                        try:
-                            units = asset_initial_value / float(asset.initial_price)
-                            asset_current_value = units * current_price
-                        except (TypeError, ZeroDivisionError):
-                            asset_current_value = asset_initial_value
-                    else:
-                        asset_current_value = asset_initial_value
-
-                    current_value += asset_current_value
-
-                profit_loss = current_value - initial_value
-                profit_loss_percent = (profit_loss / initial_value * 100) if initial_value > 0 else 0
+                    logger.warning("PortfolioAnalyzer failed in lookup: %s", e)
+                    initial_value = float(portfolio.initial_amount or 0)
+                    current_value = initial_value
+                    profit_loss = 0
+                    profit_loss_percent = 0
 
                 # Дней с момента создания (безопасно для date/datetime)
                 start_date = portfolio.start_date

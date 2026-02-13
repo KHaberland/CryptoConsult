@@ -22,14 +22,52 @@ import {
 } from 'lucide-react'
 
 const QUICK_COMMANDS = [
-  { cmd: '/status', label: 'Статус', icon: '📊' },
-  { cmd: '/recommendation', label: 'Рекомендация', icon: '💡' },
-  { cmd: '/risk', label: 'Риски', icon: '⚠️' },
-  { cmd: '/market', label: 'Рынок', icon: '📈' },
-  { cmd: '/drawdown', label: 'Просадка', icon: '📉' },
-  { cmd: '/dca', label: 'DCA', icon: '💰' },
-  { cmd: '/rebalance', label: 'Ребалансировка', icon: '🔄' },
+  {
+    cmd: '/status',
+    label: 'Статус',
+    icon: '📊',
+    tooltip: 'Текущее состояние вашего портфеля: стоимость, распределение активов и динамика. Позволяет быстро оценить общую картину инвестиций.',
+  },
+  {
+    cmd: '/recommendation',
+    label: 'Рекомендация',
+    icon: '💡',
+    tooltip: 'Персональные рекомендации консультанта на основе вашего профиля риска и рыночной ситуации. Помогает принять обоснованные решения.',
+  },
+  {
+    cmd: '/risk',
+    label: 'Риски',
+    icon: '⚠️',
+    tooltip: 'Анализ рисков вашего портфеля: волатильность, концентрация активов и потенциальные угрозы. Важно для понимания возможных потерь.',
+  },
+  {
+    cmd: '/market',
+    label: 'Рынок',
+    icon: '📈',
+    tooltip: 'Обзор рыночной ситуации: тренды, ключевые события и настроения. Контекст для принятия решений о покупке или продаже.',
+  },
+  {
+    cmd: '/drawdown',
+    label: 'Просадка',
+    icon: '📉',
+    tooltip: 'Анализ просадки портфеля — насколько упала стоимость от пика. Показывает максимальные потери и помогает оценить стресс-тест.',
+  },
+  {
+    cmd: '/dca',
+    label: 'DCA',
+    icon: '💰',
+    tooltip: 'Стратегия усреднения (Dollar Cost Averaging): планы регулярных покупок для снижения влияния волатильности на среднюю цену входа.',
+  },
+  {
+    cmd: '/rebalance',
+    label: 'Реструктуризация',
+    icon: '🔄',
+    tooltip: 'Рекомендации по приведению портфеля к целевому распределению. Помогает зафиксировать прибыль и перераспределить риски.',
+  },
 ]
+
+// Модульная переменная — сохраняется при remount в Strict Mode
+let lastProcessedUrlCmd: string | null = null
 
 export default function ChatPage() {
   const router = useRouter()
@@ -56,19 +94,21 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const lastShownRebalanceMsgId = useRef<number | null>(null)
   
   // Инициализация сессии
   useEffect(() => {
     initSession()
   }, [initSession])
   
-  // Загрузка профиля и истории после инициализации
+  // Загрузка профиля, портфеля и истории после инициализации
   useEffect(() => {
     if (isReady) {
       fetchProfile()
+      fetchPortfolioValue()
       fetchHistory()
     }
-  }, [isReady, fetchProfile, fetchHistory])
+  }, [isReady, fetchProfile, fetchPortfolioValue, fetchHistory])
   
   // Редирект если нет профиля
   useEffect(() => {
@@ -77,14 +117,23 @@ export default function ChatPage() {
     }
   }, [isReady, profileLoading, hasProfile, router])
   
-  // Обработка команды из URL
+  // Обработка команды из URL (модульная переменная предотвращает двойной вызов в Strict Mode)
   useEffect(() => {
     const cmd = searchParams.get('cmd')
-    if (cmd && isReady && hasProfile && !isSending) {
-      sendMessage(`/${cmd}`)
-      router.replace('/chat')
-    }
+    if (!cmd || !isReady || !hasProfile || isSending) return
+    if (lastProcessedUrlCmd === cmd) return
+
+    lastProcessedUrlCmd = cmd
+    sendMessage(`/${cmd}`)
+    router.replace('/chat')
   }, [searchParams, isReady, hasProfile, isSending, sendMessage, router])
+
+  // Сброс при уходе cmd из URL
+  useEffect(() => {
+    if (!searchParams.get('cmd')) {
+      lastProcessedUrlCmd = null
+    }
+  }, [searchParams])
   
   // Scroll to bottom
   useEffect(() => {
@@ -110,7 +159,7 @@ export default function ChatPage() {
     }
   }
   
-  // Обработка подтверждения ребалансировки
+  // Обработка подтверждения реструктуризации
   const handleRebalanceConfirm = async () => {
     if (!rebalanceSuggestion) return
     
@@ -119,9 +168,8 @@ export default function ChatPage() {
     await fetchPortfolioValue(true)
   }
   
-  // Парсинг сообщения AI на предмет предложения ребалансировки
+  // Парсинг сообщения AI на предмет предложения реструктуризации
   const parseRebalanceSuggestion = (content: string): RebalanceSuggestion | null => {
-    // Ищем JSON блок с предложением ребалансировки
     const jsonMatch = content.match(/\[REBALANCE_SUGGESTION\]([\s\S]*?)\[\/REBALANCE_SUGGESTION\]/)
     if (jsonMatch) {
       try {
@@ -141,10 +189,25 @@ export default function ChatPage() {
     }
     return null
   }
+
+  // Убрать JSON-блок из текста для отображения
+  const stripRebalanceBlock = (text: string): string => {
+    return text.replace(/\[REBALANCE_SUGGESTION\][\s\S]*?\[\/REBALANCE_SUGGESTION\]/g, '').trim()
+  }
   
-  // Показать кнопку "Применить изменения" если в последнем сообщении есть предложение
   const lastAssistantMessage = messages.filter(m => m.role === 'assistant').slice(-1)[0]
   const hasSuggestionInLastMessage = lastAssistantMessage?.content?.includes('[REBALANCE_SUGGESTION]')
+  
+  // Автоматически показывать модалку реструктуризации после ответа AI
+  useEffect(() => {
+    if (!hasSuggestionInLastMessage || !lastAssistantMessage || rebalanceSuggestion) return
+    if (lastShownRebalanceMsgId.current === lastAssistantMessage.id) return
+    const suggestion = parseRebalanceSuggestion(lastAssistantMessage.content)
+    if (suggestion && suggestion.newAssets.length > 0) {
+      lastShownRebalanceMsgId.current = lastAssistantMessage.id
+      showRebalanceModal(suggestion)
+    }
+  }, [hasSuggestionInLastMessage, lastAssistantMessage?.id, rebalanceSuggestion])
   
   const handleShowRebalanceFromMessage = () => {
     if (!lastAssistantMessage) return
@@ -169,7 +232,7 @@ export default function ChatPage() {
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
       <Header />
       
-      {/* Модальное окно ребалансировки */}
+      {/* Модальное окно реструктуризации */}
       {rebalanceSuggestion && (
         <PortfolioRebalanceModal
           isOpen={rebalanceSuggestion.show}
@@ -205,17 +268,29 @@ export default function ChatPage() {
         )}
         
         {/* Quick Commands - всегда вверху */}
-        <div className="flex flex-wrap gap-2 mb-4 flex-shrink-0">
-          {QUICK_COMMANDS.map(({ cmd, label, icon }) => (
-            <button
-              key={cmd}
-              onClick={() => handleQuickCommand(cmd)}
-              disabled={isSending}
-              className="flex items-center px-3 py-1.5 bg-white border rounded-full text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
-            >
-              <span className="mr-1">{icon}</span>
-              {label}
-            </button>
+        <div className="flex flex-wrap gap-2 mb-4 flex-shrink-0 overflow-visible">
+          {QUICK_COMMANDS.map(({ cmd, label, icon, tooltip }, index) => (
+            <div key={cmd} className="relative group">
+              <button
+                onClick={() => handleQuickCommand(cmd)}
+                disabled={isSending}
+                className="flex items-center px-3 py-1.5 bg-white border rounded-full text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                <span className="mr-1">{icon}</span>
+                {label}
+              </button>
+              <div
+                role="tooltip"
+                className={`absolute top-full mt-2 px-3 py-2 w-64 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 shadow-lg ${
+                  index === 0 ? 'left-0' : 'left-1/2 -translate-x-1/2'
+                }`}
+              >
+                {tooltip}
+                <div className={`absolute -top-2 border-4 border-transparent border-b-gray-800 ${
+                  index === 0 ? 'left-4' : 'left-1/2 -translate-x-1/2'
+                }`} />
+              </div>
+            </div>
           ))}
           
           {messages.length > 0 && (
@@ -267,7 +342,7 @@ export default function ChatPage() {
                         </span>
                       </div>
                       <div className="whitespace-pre-wrap text-sm">
-                        {message.content}
+                        {message.role === 'assistant' ? stripRebalanceBlock(message.content) : message.content}
                       </div>
                     </div>
                   </div>
@@ -284,15 +359,16 @@ export default function ChatPage() {
                   </div>
                 )}
                 
-                {/* Кнопка применения ребалансировки */}
-                {hasSuggestionInLastMessage && !isSending && (
+                {/* Кнопка повторного открытия предложения реструктуризации */}
+                {hasSuggestionInLastMessage && !isSending && !rebalanceSuggestion?.show && (
                   <div className="flex justify-center mt-4">
                     <Button
+                      variant="secondary"
                       onClick={handleShowRebalanceFromMessage}
                       className="flex items-center"
                     >
                       <RefreshCw className="w-4 h-4 mr-2" />
-                      Применить изменения к портфелю
+                      Показать предложение реструктуризации
                     </Button>
                   </div>
                 )}
