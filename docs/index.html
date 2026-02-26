@@ -28,7 +28,7 @@
       color: var(--gray-900);
       line-height: 1.6;
     }
-    .container { max-width: 48rem; margin: 0 auto; padding: 2rem 1.5rem; }
+    .container { max-width: 56rem; margin: 0 auto; padding: 2rem 1.5rem; }
     header { text-align: center; padding: 3rem 0 2rem; }
     .logo {
       display: inline-flex;
@@ -42,12 +42,15 @@
     }
     .logo svg { width: 2.5rem; height: 2.5rem; color: var(--primary-600); }
     h1 { font-size: 2.25rem; font-weight: 700; margin-bottom: 0.75rem; }
-    .tagline { font-size: 1.125rem; color: var(--gray-600); max-width: 32rem; margin: 0 auto; }
+    .tagline { font-size: 1.125rem; color: var(--gray-600); max-width: 36rem; margin: 0 auto; }
+    h2 { font-size: 1.25rem; font-weight: 600; margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--primary-100); }
+    .section { margin-bottom: 2rem; }
+    .section p { color: var(--gray-600); margin-bottom: 0.75rem; }
     .features {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
       gap: 1.5rem;
-      margin: 2.5rem 0;
+      margin: 1.5rem 0;
     }
     .feature {
       background: #fff;
@@ -69,7 +72,25 @@
     .feature-icon.chat { background: #f3e8ff; color: #7c3aed; }
     .feature h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem; }
     .feature p { font-size: 0.875rem; color: var(--gray-600); }
-    .cta { text-align: center; padding: 2rem 0; }
+    .stack { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1.5rem; margin: 1rem 0; }
+    .stack-card {
+      background: #fff;
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .stack-card h4 { font-size: 0.9rem; color: var(--primary-700); margin-bottom: 0.5rem; }
+    .stack-card ul { font-size: 0.875rem; color: var(--gray-600); list-style: none; }
+    .stack-card li { padding: 0.2rem 0; }
+    .stack-card li::before { content: "• "; color: var(--primary-500); }
+    .req-list { background: #fff; border-radius: 0.75rem; padding: 1.25rem; margin: 1rem 0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .req-list ul { list-style: none; }
+    .req-list li { padding: 0.5rem 0; padding-left: 1.5rem; position: relative; }
+    .req-list li::before { content: "✓"; position: absolute; left: 0; color: var(--primary-600); font-weight: 700; }
+    .req-list .important { margin-top: 1rem; padding: 0.75rem; background: #fef3c7; border-radius: 0.5rem; font-size: 0.875rem; }
+    .commands { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0; }
+    .cmd { background: var(--gray-100); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-family: monospace; font-size: 0.8rem; }
+    .cta { text-align: center; padding: 2.5rem 0; }
     .btn {
       display: inline-flex;
       align-items: center;
@@ -93,6 +114,9 @@
       color: var(--gray-600);
     }
     footer .disclaimer { margin-top: 0.5rem; font-size: 0.75rem; color: #9ca3af; }
+    a { color: var(--primary-600); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { background: var(--gray-100); padding: 0.1rem 0.3rem; border-radius: 0.25rem; font-size: 0.85em; }
   </style>
 </head>
 <body>
@@ -104,36 +128,84 @@
         </svg>
       </div>
       <h1>Крипто-Консультант</h1>
-      <p class="tagline">Ваш персональный помощник для долгосрочных и безопасных инвестиций в криптовалюты</p>
+      <p class="tagline">Персональный ИИ-ассистент для долгосрочного инвестирования в криптовалюты с управляемым риском</p>
     </header>
 
-    <section class="features">
-      <div class="feature">
-        <div class="feature-icon chart">
-          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z" />
-          </svg>
+    <section class="section">
+      <h2>О проекте</h2>
+      <p><strong>Крипто-Консультант</strong> — это сервис, который помогает формировать и контролировать криптопортфель на основе ваших целей и толерантности к риску. Приложение не управляет вашими средствами и не совершает сделки — оно даёт рекомендации и аналитику.</p>
+      <p>После прохождения анкеты (10 вопросов о горизонте инвестиций, сумме, допустимой просадке и опыте) система формирует диверсифицированный портфель. ИИ-консультант отвечает на вопросы, анализирует риски и предупреждает о просадках.</p>
+    </section>
+
+    <section class="section">
+      <h2>Возможности</h2>
+      <div class="features">
+        <div class="feature">
+          <div class="feature-icon chart">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z" />
+            </svg>
+          </div>
+          <h3>Анализ портфеля</h3>
+          <p>Отслеживание распределения активов, рисков и цен в реальном времени. Базовый портфель: BTC, ETH, USDT + 10% альткойны.</p>
         </div>
-        <h3>Анализ портфеля</h3>
-        <p>Следите за распределением инвестиций, рисками и колебаниями цен в реальном времени.</p>
+        <div class="feature">
+          <div class="feature-icon shield">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+          </div>
+          <h3>Контроль рисков</h3>
+          <p>Алерты при просадке: Warning (80% от допустимого) и Critical (превышение). Рекомендации по ребалансировке и DCA.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon chat">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+          </div>
+          <h3>AI Консультант</h3>
+          <p>Команды: /status, /recommendation, /risk, /market, /drawdown, /dca, /rebalance. Сервис не управляет средствами.</p>
+        </div>
       </div>
-      <div class="feature">
-        <div class="feature-icon shield">
-          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-          </svg>
+    </section>
+
+    <section class="section">
+      <h2>Технологический стек</h2>
+      <div class="stack">
+        <div class="stack-card">
+          <h4>Backend</h4>
+          <ul>
+            <li>Django 4.2</li>
+            <li>Django REST Framework</li>
+            <li>JWT аутентификация</li>
+            <li>OpenAI API</li>
+            <li>CoinGecko API</li>
+          </ul>
         </div>
-        <h3>Контроль рисков</h3>
-        <p>Консервативная стратегия с мониторингом рынка и предупреждениями о просадках.</p>
+        <div class="stack-card">
+          <h4>Frontend</h4>
+          <ul>
+            <li>Next.js 14</li>
+            <li>TypeScript</li>
+            <li>Tailwind CSS</li>
+            <li>Zustand</li>
+            <li>Axios</li>
+          </ul>
+        </div>
       </div>
-      <div class="feature">
-        <div class="feature-icon chat">
-          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-          </svg>
-        </div>
-        <h3>AI Консультант</h3>
-        <p>Получайте советы и рекомендации для обдуманных решений. Сервис не управляет средствами.</p>
+    </section>
+
+    <section class="section">
+      <h2>Требования для работы</h2>
+      <div class="req-list">
+        <ul>
+          <li><strong>ОС:</strong> Windows 10/11 (64-bit)</li>
+          <li><strong>Python 3.10+</strong> — <a href="https://python.org">python.org</a></li>
+          <li><strong>Node.js 18+</strong> — <a href="https://nodejs.org">nodejs.org</a></li>
+          <li><strong>OpenAI API ключ</strong> — для работы ИИ-консультанта</li>
+        </ul>
+        <p class="important">После установки приложения нужно создать файл <code>.env</code> в папке backend и добавить <code>OPENAI_API_KEY=ваш_ключ</code>. Ключ можно получить на <a href="https://platform.openai.com">platform.openai.com</a>.</p>
       </div>
     </section>
 
@@ -144,7 +216,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
         </svg>
       </a>
-      <p class="version">Windows • Python 3.10+ • Node.js 18+</p>
+      <p class="version">Windows • Python 3.10+ • Node.js 18+ • OpenAI API</p>
     </section>
 
     <footer>
