@@ -1,0 +1,40 @@
+# Публикация лендинга на GitHub Pages
+# Запускается при пуше в main
+
+name: GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: github-pages
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Загрузить контент
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Развернуть на GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

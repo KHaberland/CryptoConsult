@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Крипто-Консультант — персональный ИИ-ассистент для долгосрочного инвестирования в криптовалюты с управляемым риском">
+  <title>Крипто-Консультант — ИИ-помощник для криптоинвестиций</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary-50: #f0f9ff;
+      --primary-100: #e0f2fe;
+      --primary-500: #0ea5e9;
+      --primary-600: #0284c7;
+      --primary-700: #0369a1;
+      --gray-50: #f9fafb;
+      --gray-100: #f3f4f6;
+      --gray-600: #4b5563;
+      --gray-900: #111827;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: linear-gradient(135deg, var(--primary-50) 0%, #fff 50%, #e0f2fe 100%);
+      min-height: 100vh;
+      color: var(--gray-900);
+      line-height: 1.6;
+    }
+    .container { max-width: 48rem; margin: 0 auto; padding: 2rem 1.5rem; }
+    header { text-align: center; padding: 3rem 0 2rem; }
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 5rem;
+      height: 5rem;
+      background: var(--primary-100);
+      border-radius: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .logo svg { width: 2.5rem; height: 2.5rem; color: var(--primary-600); }
+    h1 { font-size: 2.25rem; font-weight: 700; margin-bottom: 0.75rem; }
+    .tagline { font-size: 1.125rem; color: var(--gray-600); max-width: 32rem; margin: 0 auto; }
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+      gap: 1.5rem;
+      margin: 2.5rem 0;
+    }
+    .feature {
+      background: #fff;
+      border-radius: 1rem;
+      padding: 1.5rem;
+      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+    }
+    .feature-icon {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+    .feature-icon.chart { background: #dcfce7; color: #16a34a; }
+    .feature-icon.shield { background: #dbeafe; color: #2563eb; }
+    .feature-icon.chat { background: #f3e8ff; color: #7c3aed; }
+    .feature h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .feature p { font-size: 0.875rem; color: var(--gray-600); }
+    .cta { text-align: center; padding: 2rem 0; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--primary-600);
+      color: #fff;
+      font-weight: 500;
+      padding: 0.875rem 1.75rem;
+      border-radius: 0.5rem;
+      text-decoration: none;
+      font-size: 1rem;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: var(--primary-700); }
+    .btn svg { width: 1.25rem; height: 1.25rem; }
+    .version { margin-top: 1rem; font-size: 0.875rem; color: var(--gray-600); }
+    footer {
+      text-align: center;
+      padding: 2rem 1rem;
+      font-size: 0.875rem;
+      color: var(--gray-600);
+    }
+    footer .disclaimer { margin-top: 0.5rem; font-size: 0.75rem; color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+        </svg>
+      </div>
+      <h1>Крипто-Консультант</h1>
+      <p class="tagline">Ваш персональный помощник для долгосрочных и безопасных инвестиций в криптовалюты</p>
+    </header>
+
+    <section class="features">
+      <div class="feature">
+        <div class="feature-icon chart">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z" />
+          </svg>
+        </div>
+        <h3>Анализ портфеля</h3>
+        <p>Следите за распределением инвестиций, рисками и колебаниями цен в реальном времени.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon shield">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+          </svg>
+        </div>
+        <h3>Контроль рисков</h3>
+        <p>Консервативная стратегия с мониторингом рынка и предупреждениями о просадках.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon chat">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+        </div>
+        <h3>AI Консультант</h3>
+        <p>Получайте советы и рекомендации для обдуманных решений. Сервис не управляет средствами.</p>
+      </div>
+    </section>
+
+    <section class="cta">
+      <a href="https://github.com/KHaberland/CryptoConsult/releases" class="btn">
+        Скачать приложение
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+        </svg>
+      </a>
+      <p class="version">Windows • Python 3.10+ • Node.js 18+</p>
+    </section>
+
+    <footer>
+      <p>⚠️ Это информационный сервис, а не финансовый совет.</p>
+      <p>Инвестиции в криптовалюты связаны с высоким риском.</p>
+      <p class="disclaimer">
+        <a href="https://github.com/KHaberland/CryptoConsult">GitHub</a> • MIT License
+      </p>
+    </footer>
+  </div>
+</body>
+</html>

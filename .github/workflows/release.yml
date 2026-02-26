@@ -1,0 +1,78 @@
+# Сборка установщика CryptoConsult при пуше тега v*
+# Результат: CryptoConsult-Setup-X.Y.Z.exe загружается в Release
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Установить Inno Setup
+        run: choco install innosetup -y
+
+      - name: Установить Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm install (frontend)
+        run: npm ci
+        working-directory: frontend
+
+      - name: Обновить версию из тега
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          (Get-Content version.py) -replace '__version__ = ".*"', "__version__ = `"$ver`"" | Set-Content version.py
+          (Get-Content installer\CryptoConsult.iss) -replace '#define MyAppVersion ".*"', "#define MyAppVersion `"$ver`"" | Set-Content installer\CryptoConsult.iss
+
+      - name: Синхронизировать версию
+        run: node scripts/sync-version.js
+        working-directory: frontend
+
+      - name: npm run build (frontend)
+        run: npm run build
+        working-directory: frontend
+
+      - name: Подготовить frontend-standalone
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist\frontend-standalone" | Out-Null
+          Copy-Item -Path "frontend\.next\standalone\*" -Destination "dist\frontend-standalone" -Recurse -Force
+          New-Item -ItemType Directory -Force -Path "dist\frontend-standalone\.next" | Out-Null
+          Copy-Item -Path "frontend\.next\static" -Destination "dist\frontend-standalone\.next\static" -Recurse -Force
+          if (Test-Path "frontend\public") {
+            Copy-Item -Path "frontend\public\*" -Destination "dist\frontend-standalone\public" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if (Test-Path "frontend\start-frontend.bat") {
+            Copy-Item -Path "frontend\start-frontend.bat" -Destination "dist\frontend-standalone" -Force
+          }
+
+      - name: Собрать установщик (Inno Setup)
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc installer\CryptoConsult.iss
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: CryptoConsult-Installer
+          path: dist/installer/*.exe
+
+      - name: Создать Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/installer/*.exe
+          generate_release_notes: true
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
