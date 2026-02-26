@@ -9,9 +9,13 @@ import { Header } from '@/components/layout/Header'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Alert } from '@/components/ui/Alert'
+import { ApiKeyBanner } from '@/components/ui/ApiKeyBanner'
 import { Progress } from '@/components/ui/Progress'
 import { ContributeModal } from '@/components/portfolio/ContributeModal'
 import { WithdrawModal } from '@/components/portfolio/WithdrawModal'
+import { ForecastModal } from '@/components/forecast/ForecastModal'
+import { BtcAnalysisModal } from '@/components/forecast/BtcAnalysisModal'
+import { chatApi, versionApi } from '@/services/api'
 import { formatCurrency, formatPercent, formatDate } from '@/lib/utils'
 import {
   TrendingUp,
@@ -23,6 +27,7 @@ import {
   CalendarClock,
   PlusCircle,
   Wallet,
+  BarChart3,
 } from 'lucide-react'
 import { getDcaEntriesWithCumulative } from '@/lib/dca'
 
@@ -30,6 +35,25 @@ export default function DashboardPage() {
   const router = useRouter()
   const [showContributeModal, setShowContributeModal] = useState(false)
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
+  const [showForecastModal, setShowForecastModal] = useState(false)
+  const [showBtcAnalysisModal, setShowBtcAnalysisModal] = useState(false)
+  const [btcAnalysisData, setBtcAnalysisData] = useState<{
+    sections: Array<{ title: string; content: string }>
+    forecast_6months: string
+    buy_recommendation: string
+  } | null>(null)
+  const [btcAnalysisLoading, setBtcAnalysisLoading] = useState(false)
+  const [btcAnalysisError, setBtcAnalysisError] = useState<string | null>(null)
+  const [forecastData, setForecastData] = useState<{
+    days: number
+    positive: { description: string; probability: number }
+    negative: { description: string; probability: number }
+    base: { description: string; probability: number }
+    portfolio_outlook?: { most_likely_scenario: string; description: string }
+  } | null>(null)
+  const [forecastLoading, setForecastLoading] = useState(false)
+  const [forecastError, setForecastError] = useState<string | null>(null)
+  const [apiKeyConfigured, setApiKeyConfigured] = useState<boolean | null>(null)
   const { initSession, isReady } = useSessionStore()
   const {
     portfolioValue,
@@ -56,6 +80,14 @@ export default function DashboardPage() {
       fetchPortfolioValue()
     }
   }, [isReady, fetchProfile, fetchPortfolioValue])
+
+  // Проверка наличия API ключа
+  useEffect(() => {
+    if (!isReady) return
+    versionApi.getFull()
+      .then((data) => setApiKeyConfigured(data.api_key_configured))
+      .catch(() => setApiKeyConfigured(null))
+  }, [isReady])
   
   // Если нет профиля — редирект на анкету
   useEffect(() => {
@@ -73,6 +105,42 @@ export default function DashboardPage() {
   
   const handleRefresh = () => {
     fetchPortfolioValue(true) // force = true для ручного обновления
+  }
+
+  const handleForecastClick = async (days: number) => {
+    setShowForecastModal(true)
+    setForecastData(null)
+    setForecastError(null)
+    setForecastLoading(true)
+    try {
+      const data = await chatApi.getMarketForecast(days)
+      setForecastData(data)
+    } catch (err: unknown) {
+      const msg = err && typeof err === 'object' && 'response' in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : null
+      setForecastError(msg || 'Не удалось получить прогноз')
+    } finally {
+      setForecastLoading(false)
+    }
+  }
+
+  const handleBtcAnalysisClick = async () => {
+    setShowBtcAnalysisModal(true)
+    setBtcAnalysisData(null)
+    setBtcAnalysisError(null)
+    setBtcAnalysisLoading(true)
+    try {
+      const data = await chatApi.getBtcAnalysis()
+      setBtcAnalysisData(data)
+    } catch (err: unknown) {
+      const msg = err && typeof err === 'object' && 'response' in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : null
+      setBtcAnalysisError(msg || 'Не удалось выполнить анализ BTC')
+    } finally {
+      setBtcAnalysisLoading(false)
+    }
   }
   
   if (!isReady || isLoading || !portfolioValue) {
@@ -119,6 +187,9 @@ export default function DashboardPage() {
       <Header />
       
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {apiKeyConfigured === false && (
+          <ApiKeyBanner variant="dashboard" className="mb-6" />
+        )}
         {error && (
           <Alert variant="error" className="mb-6">
             {error}
@@ -315,6 +386,14 @@ export default function DashboardPage() {
                   Статус портфеля
                 </Button>
               </Link>
+              <Button
+                className="w-full"
+                variant="secondary"
+                onClick={handleBtcAnalysisClick}
+              >
+                <BarChart3 className="w-4 h-4 mr-1" />
+                Анализ BTC
+              </Button>
               {(totalInvestment > investedSoFar || !showDcaBreakdown) && (
                 <Button
                   className="w-full"
@@ -430,6 +509,20 @@ export default function DashboardPage() {
           await withdraw(assets)
         }}
         totalValue={displayTotalValue}
+      />
+      <ForecastModal
+        isOpen={showForecastModal}
+        onClose={() => setShowForecastModal(false)}
+        forecast={forecastData}
+        isLoading={forecastLoading}
+        error={forecastError}
+      />
+      <BtcAnalysisModal
+        isOpen={showBtcAnalysisModal}
+        onClose={() => setShowBtcAnalysisModal(false)}
+        data={btcAnalysisData}
+        isLoading={btcAnalysisLoading}
+        error={btcAnalysisError}
       />
     </div>
   )

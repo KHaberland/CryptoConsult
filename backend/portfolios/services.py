@@ -432,6 +432,59 @@ class PriceService:
             
             return []
     
+    def get_historical_prices_with_volumes(
+        self,
+        symbol: str,
+        days: int = 30
+    ) -> List[Dict]:
+        """
+        Получить исторические цены и объёмы актива (для анализа BTC).
+        
+        Returns:
+            Список [{"date": timestamp, "price": float, "volume": float}, ...]
+        """
+        symbol = symbol.upper()
+        if symbol not in self.SYMBOL_TO_ID:
+            return []
+        
+        cache_key = f"history_vol:{symbol}:{days}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached
+        
+        self.rate_limiter.wait_if_needed()
+        coin_id = self.SYMBOL_TO_ID[symbol]
+        
+        try:
+            response = requests.get(
+                f"{self.COINGECKO_URL}/coins/{coin_id}/market_chart",
+                params={"vs_currency": "usd", "days": days},
+                timeout=15
+            )
+            if response.status_code == 429:
+                self.rate_limiter.set_blocked(60)
+                raise requests.RequestException("Rate limited (429)")
+            response.raise_for_status()
+            data = response.json()
+            
+            prices_by_ts = {ts: p for ts, p in data.get("prices", [])}
+            volumes_by_ts = {ts: v for ts, v in data.get("total_volumes", [])}
+            
+            result = []
+            for ts in sorted(prices_by_ts.keys()):
+                result.append({
+                    "date": ts,
+                    "price": prices_by_ts[ts],
+                    "volume": volumes_by_ts.get(ts, 0),
+                })
+            if result:
+                self.cache.set(cache_key, result)
+            return result
+        except requests.RequestException as e:
+            logger.error(f"Ошибка получения истории {symbol}: {e}")
+            stale = self.cache.get_stale(cache_key)
+            return stale if stale else []
+    
     def get_market_data(self, symbols: List[str]) -> Dict[str, Dict]:
         """
         Получить расширенные рыночные данные.
@@ -665,4 +718,288 @@ class PriceService:
             diff = 100.0 - total
             if assets:
                 assets[-1]["percentage"] = round(assets[-1]["percentage"] + diff, 2)
+        return assets
+
+    def get_some_experience_portfolio_assets(self) -> List[Dict]:
+        """
+        Базовый портфель для уровня «Немного опыта» (уровень 2):
+        BTC 50%, ETH 20%, USDT 10%, 5 альткойнов из top 10 CoinGecko (кроме BTC, ETH, USDT) по 4% каждый.
+        """
+        top = self.fetch_top_coins_from_coingecko(per_page=10)
+        if not top:
+            # Fallback: BNB, SOL, XRP, ADA, DOGE (топ-10 без BTC, ETH, USDT)
+            return [
+                {"symbol": "BTC", "name": "Bitcoin", "percentage": 50.0},
+                {"symbol": "ETH", "name": "Ethereum", "percentage": 20.0},
+                {"symbol": "USDT", "name": "Tether", "percentage": 10.0},
+                {"symbol": "BNB", "name": "Binance Coin", "percentage": 4.0},
+                {"symbol": "SOL", "name": "Solana", "percentage": 4.0},
+                {"symbol": "XRP", "name": "XRP", "percentage": 4.0},
+                {"symbol": "ADA", "name": "Cardano", "percentage": 4.0},
+                {"symbol": "DOGE", "name": "Dogecoin", "percentage": 4.0},
+            ]
+
+        assets: List[Dict] = []
+        btc_done = eth_done = stable_done = False
+        alts: List[Dict] = []
+
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            name = coin.get("name") or sym
+            price = coin.get("current_price") or 0
+            if sym == "BTC" and not btc_done:
+                assets.append({"symbol": sym, "name": name, "percentage": 50.0, "initial_price": price})
+                btc_done = True
+            elif sym == "ETH" and not eth_done:
+                assets.append({"symbol": sym, "name": name, "percentage": 20.0, "initial_price": price})
+                eth_done = True
+            elif (coin.get("symbol") or "").lower() in self.STABLECOIN_SYMBOLS and not stable_done:
+                assets.append({"symbol": sym, "name": name, "percentage": 10.0, "initial_price": price})
+                stable_done = True
+            else:
+                if sym not in ("BTC", "ETH") and (coin.get("symbol") or "").lower() not in self.STABLECOIN_SYMBOLS:
+                    alts.append({"symbol": sym, "name": name, "initial_price": price})
+
+        # Ровно 5 альтов по 4%
+        for alt in alts[:5]:
+            assets.append({
+                "symbol": alt["symbol"],
+                "name": alt["name"],
+                "percentage": 4.0,
+                "initial_price": alt.get("initial_price"),
+            })
+
+        if not stable_done:
+            insert_idx = 2
+            for i, a in enumerate(assets):
+                if a.get("symbol") == "ETH":
+                    insert_idx = i + 1
+                    break
+            assets.insert(insert_idx, {"symbol": "USDT", "name": "Tether", "percentage": 10.0, "initial_price": 1.0})
+
+        total = sum(a["percentage"] for a in assets)
+        if abs(total - 100.0) > 0.01:
+            diff = 100.0 - total
+            if assets:
+                assets[-1]["percentage"] = round(assets[-1]["percentage"] + diff, 2)
+        return assets
+
+    def _get_infrastructure_alts(self, total_pct: float, per_alt: float) -> List[Dict]:
+        """
+        Альты из топ-15 CoinGecko (инфраструктурные проекты), как в портфеле начинающего.
+        total_pct — общая доля на альты, per_alt — доля на каждый из 5 альтов.
+        """
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        alts: List[Dict] = []
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            name = coin.get("name") or sym
+            if sym not in ("BTC", "ETH") and (coin.get("symbol") or "").lower() not in self.STABLECOIN_SYMBOLS:
+                alts.append({"symbol": sym, "name": name, "initial_price": coin.get("current_price") or 0})
+        result = []
+        for alt in alts[:5]:
+            result.append({
+                "symbol": alt["symbol"],
+                "name": alt["name"],
+                "percentage": per_alt,
+                "initial_price": alt.get("initial_price"),
+            })
+        if result and abs(sum(a["percentage"] for a in result) - total_pct) > 0.01:
+            diff = total_pct - sum(a["percentage"] for a in result)
+            result[-1]["percentage"] = round(result[-1]["percentage"] + diff, 2)
+        return result
+
+    def get_medium_portfolio_with_liquidity(self) -> List[Dict]:
+        """
+        ВАРИАНТ 1: Средний опыт + нужна возможность частичного вывода.
+        50% BTC, 25% ETH, 15% стейблкоины (USDT/USDC), 10% инфраструктура (как у начинающего).
+        """
+        alts = self._get_infrastructure_alts(10.0, 2.0)
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        if not top or not alts:
+            return [
+                {"symbol": "BTC", "name": "Bitcoin", "percentage": 50.0},
+                {"symbol": "ETH", "name": "Ethereum", "percentage": 25.0},
+                {"symbol": "USDT", "name": "Tether", "percentage": 15.0},
+                {"symbol": "BNB", "name": "BNB", "percentage": 2.0},
+                {"symbol": "SOL", "name": "Solana", "percentage": 2.0},
+                {"symbol": "XRP", "name": "XRP", "percentage": 2.0},
+                {"symbol": "ADA", "name": "Cardano", "percentage": 2.0},
+                {"symbol": "DOGE", "name": "Dogecoin", "percentage": 2.0},
+            ]
+        btc_price = eth_price = 0
+        stable_sym, stable_name = "USDT", "Tether"
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            if sym == "BTC":
+                btc_price = coin.get("current_price") or 0
+            elif sym == "ETH":
+                eth_price = coin.get("current_price") or 0
+            elif (coin.get("symbol") or "").lower() in self.STABLECOIN_SYMBOLS:
+                stable_sym, stable_name = sym, coin.get("name") or sym
+                break
+        assets = [
+            {"symbol": "BTC", "name": "Bitcoin", "percentage": 50.0, "initial_price": btc_price},
+            {"symbol": "ETH", "name": "Ethereum", "percentage": 25.0, "initial_price": eth_price},
+            {"symbol": stable_sym, "name": stable_name, "percentage": 15.0, "initial_price": 1.0},
+        ]
+        assets.extend(alts)
+        total = sum(a["percentage"] for a in assets)
+        if abs(total - 100.0) > 0.01 and assets:
+            assets[-1]["percentage"] = round(assets[-1]["percentage"] + (100.0 - total), 2)
+        return assets
+
+    def get_medium_portfolio_no_liquidity(self) -> List[Dict]:
+        """
+        ВАРИАНТ 2: Средний опыт + могу держать без вывода (жёсткий холд 5 лет).
+        55% BTC, 30% ETH, 10% SOL, 5% инфраструктура (как у начинающего).
+        """
+        alts = self._get_infrastructure_alts(5.0, 1.0)
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        if not top or not alts:
+            return [
+                {"symbol": "BTC", "name": "Bitcoin", "percentage": 55.0},
+                {"symbol": "ETH", "name": "Ethereum", "percentage": 30.0},
+                {"symbol": "SOL", "name": "Solana", "percentage": 10.0},
+                {"symbol": "BNB", "name": "BNB", "percentage": 1.0},
+                {"symbol": "XRP", "name": "XRP", "percentage": 1.0},
+                {"symbol": "ADA", "name": "Cardano", "percentage": 1.0},
+                {"symbol": "DOGE", "name": "Dogecoin", "percentage": 1.0},
+                {"symbol": "DOT", "name": "Polkadot", "percentage": 1.0},
+            ]
+        btc_price = eth_price = sol_price = 0
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            if sym == "BTC":
+                btc_price = coin.get("current_price") or 0
+            elif sym == "ETH":
+                eth_price = coin.get("current_price") or 0
+            elif sym == "SOL":
+                sol_price = coin.get("current_price") or 0
+        assets = [
+            {"symbol": "BTC", "name": "Bitcoin", "percentage": 55.0, "initial_price": btc_price},
+            {"symbol": "ETH", "name": "Ethereum", "percentage": 30.0, "initial_price": eth_price},
+            {"symbol": "SOL", "name": "Solana", "percentage": 10.0, "initial_price": sol_price},
+        ]
+        assets.extend(alts)
+        total = sum(a["percentage"] for a in assets)
+        if abs(total - 100.0) > 0.01 and assets:
+            assets[-1]["percentage"] = round(assets[-1]["percentage"] + (100.0 - total), 2)
+        return assets
+
+    def _get_speculative_alt(self) -> Optional[Dict]:
+        """Спекулятивный компонент: DOGE или другой мем/трендовый из топ-15."""
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            name = coin.get("name") or sym
+            if sym in ("DOGE", "SHIB", "PEPE", "FLOKI", "BONK", "WIF"):
+                return {"symbol": sym, "name": name, "percentage": 5.0, "initial_price": coin.get("current_price") or 0}
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            name = coin.get("name") or sym
+            if sym not in ("BTC", "ETH") and (coin.get("symbol") or "").lower() not in self.STABLECOIN_SYMBOLS:
+                return {"symbol": sym, "name": name, "percentage": 5.0, "initial_price": coin.get("current_price") or 0}
+        return {"symbol": "DOGE", "name": "Dogecoin", "percentage": 5.0, "initial_price": 0}
+
+    def _get_experimental_alt(self, exclude: set) -> Optional[Dict]:
+        """Экспериментальный сектор: 1 альт из топ-15, не входящий в exclude."""
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            name = coin.get("name") or sym
+            if sym not in exclude and (coin.get("symbol") or "").lower() not in self.STABLECOIN_SYMBOLS:
+                return {"symbol": sym, "name": name, "percentage": 3.0, "initial_price": coin.get("current_price") or 0}
+        return None
+
+    def get_advanced_portfolio_with_liquidity(self) -> List[Dict]:
+        """
+        Продвинутый инвестор ВАРИАНТ 1: с возможностью частичного вывода.
+        45% BTC, 25% ETH, 10% стейбл, 10% SOL, 5% LINK, 5% спекулятивный (DOGE и т.п.).
+        """
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        if not top:
+            return [
+                {"symbol": "BTC", "name": "Bitcoin", "percentage": 45.0},
+                {"symbol": "ETH", "name": "Ethereum", "percentage": 25.0},
+                {"symbol": "USDT", "name": "Tether", "percentage": 10.0},
+                {"symbol": "SOL", "name": "Solana", "percentage": 10.0},
+                {"symbol": "LINK", "name": "Chainlink", "percentage": 5.0},
+                {"symbol": "DOGE", "name": "Dogecoin", "percentage": 5.0},
+            ]
+        btc_price = eth_price = sol_price = link_price = 0
+        stable_sym, stable_name = "USDT", "Tether"
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            if sym == "BTC":
+                btc_price = coin.get("current_price") or 0
+            elif sym == "ETH":
+                eth_price = coin.get("current_price") or 0
+            elif sym == "SOL":
+                sol_price = coin.get("current_price") or 0
+            elif sym == "LINK":
+                link_price = coin.get("current_price") or 0
+            elif (coin.get("symbol") or "").lower() in self.STABLECOIN_SYMBOLS:
+                stable_sym, stable_name = sym, coin.get("name") or sym
+        speculative = self._get_speculative_alt()
+        assets = [
+            {"symbol": "BTC", "name": "Bitcoin", "percentage": 45.0, "initial_price": btc_price},
+            {"symbol": "ETH", "name": "Ethereum", "percentage": 25.0, "initial_price": eth_price},
+            {"symbol": stable_sym, "name": stable_name, "percentage": 10.0, "initial_price": 1.0},
+            {"symbol": "SOL", "name": "Solana", "percentage": 10.0, "initial_price": sol_price},
+            {"symbol": "LINK", "name": "Chainlink", "percentage": 5.0, "initial_price": link_price},
+        ]
+        if speculative:
+            assets.append(speculative)
+        total = sum(a["percentage"] for a in assets)
+        if abs(total - 100.0) > 0.01 and assets:
+            assets[-1]["percentage"] = round(assets[-1]["percentage"] + (100.0 - total), 2)
+        return assets
+
+    def get_advanced_portfolio_no_liquidity(self) -> List[Dict]:
+        """
+        Продвинутый инвестор ВАРИАНТ 2: капитал не нужен 7 лет (жёсткий холд).
+        40% BTC, 30% ETH, 15% SOL, 7% LINK, 5% DOGE, 3% экспериментальный.
+        """
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        if not top:
+            return [
+                {"symbol": "BTC", "name": "Bitcoin", "percentage": 40.0},
+                {"symbol": "ETH", "name": "Ethereum", "percentage": 30.0},
+                {"symbol": "SOL", "name": "Solana", "percentage": 15.0},
+                {"symbol": "LINK", "name": "Chainlink", "percentage": 7.0},
+                {"symbol": "DOGE", "name": "Dogecoin", "percentage": 5.0},
+                {"symbol": "XRP", "name": "XRP", "percentage": 3.0},
+            ]
+        btc_price = eth_price = sol_price = link_price = doge_price = 0
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            if sym == "BTC":
+                btc_price = coin.get("current_price") or 0
+            elif sym == "ETH":
+                eth_price = coin.get("current_price") or 0
+            elif sym == "SOL":
+                sol_price = coin.get("current_price") or 0
+            elif sym == "LINK":
+                link_price = coin.get("current_price") or 0
+            elif sym == "DOGE":
+                doge_price = coin.get("current_price") or 0
+        speculative = self._get_speculative_alt()
+        spec_sym = speculative.get("symbol") if speculative else ""
+        experimental = self._get_experimental_alt(exclude={"BTC", "ETH", "SOL", "LINK", spec_sym})
+        assets = [
+            {"symbol": "BTC", "name": "Bitcoin", "percentage": 40.0, "initial_price": btc_price},
+            {"symbol": "ETH", "name": "Ethereum", "percentage": 30.0, "initial_price": eth_price},
+            {"symbol": "SOL", "name": "Solana", "percentage": 15.0, "initial_price": sol_price},
+            {"symbol": "LINK", "name": "Chainlink", "percentage": 7.0, "initial_price": link_price},
+        ]
+        if speculative:
+            if speculative.get("symbol") == "DOGE":
+                speculative["initial_price"] = doge_price
+            assets.append(speculative)
+        if experimental:
+            assets.append(experimental)
+        total = sum(a["percentage"] for a in assets)
+        if abs(total - 100.0) > 0.01 and assets:
+            assets[-1]["percentage"] = round(assets[-1]["percentage"] + (100.0 - total), 2)
         return assets

@@ -1,9 +1,15 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 
+from django.conf import settings
+
 from portfolios.models import Portfolio
+
+logger = logging.getLogger(__name__)
 from users.models import InvestorProfile
 from .models import ChatMessage
 from .serializers import (
@@ -286,13 +292,45 @@ class DrawdownAlertView(APIView):
             )
 
 
-class MarketForecastView(APIView):
-    """Прогноз крипторынка на 6 месяцев (3 сценария)."""
+class BtcAnalysisView(APIView):
+    """Глубокий анализ Bitcoin по 10-раздельному плану с прогнозом на 6 месяцев."""
     permission_classes = (AllowAny,)
     
     def get(self, request):
         """
-        Получить анализ крипторынка на 6 месяцев вперёд.
+        Получить анализ BTC: цена/объёмы, MA, RSI, MACD, волатильность,
+        он-чейн, новости, сентимент → прогноз на 6 мес и рекомендация по покупке.
+        Использует session_id для персонализации рекомендаций по профилю.
+        """
+        try:
+            advisor = AIAdvisorService()
+            session_id = getattr(request, 'session_id', None)
+            result = advisor.get_btc_analysis(session_id=session_id)
+            return Response(result)
+        except ValueError as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:
+            logger.exception('Ошибка при выполнении анализа BTC')
+            detail = str(e) if settings.DEBUG else 'Не удалось выполнить анализ BTC.'
+            return Response(
+                {'detail': detail},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class MarketForecastView(APIView):
+    """Прогноз крипторынка на N дней (3 сценария)."""
+    permission_classes = (AllowAny,)
+    
+    def get(self, request):
+        """
+        Получить анализ крипторынка на N дней вперёд.
+        
+        Query params:
+            days: 30, 90 или 180 (по умолчанию 180)
         
         Возвращает 3 сценария с вероятностями:
         - positive: позитивный сценарий
@@ -300,8 +338,16 @@ class MarketForecastView(APIView):
         - base: базовый сценарий
         """
         try:
+            days_param = request.query_params.get('days', '180')
+            try:
+                days = int(days_param)
+                if days not in (30, 90, 180):
+                    days = 180
+            except ValueError:
+                days = 180
+            
             advisor = AIAdvisorService()
-            forecast = advisor.get_market_forecast_6m()
+            forecast = advisor.get_market_forecast(days=days)
             return Response(forecast)
         except ValueError as e:
             return Response(

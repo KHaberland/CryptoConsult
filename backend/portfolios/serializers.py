@@ -47,6 +47,7 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
     use_default_assets = serializers.BooleanField(default=True, write_only=True)
     custom_assets = PortfolioAssetSerializer(many=True, required=False, write_only=True)
     experience_level = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    needs_liquidity = serializers.BooleanField(required=False, default=True, write_only=True)
 
     class Meta:
         model = Portfolio
@@ -57,6 +58,7 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
             'use_default_assets',
             'custom_assets',
             'experience_level',
+            'needs_liquidity',
         )
 
     def validate_initial_amount(self, value):
@@ -92,6 +94,7 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
         use_default = validated_data.pop('use_default_assets', True)
         custom_assets = validated_data.pop('custom_assets', None)
         experience_level = (validated_data.pop('experience_level', '') or '').strip().lower()
+        needs_liquidity = validated_data.pop('needs_liquidity', True)
 
         session_id = validated_data.get('session_id')
         if not session_id:
@@ -102,6 +105,18 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
 
         if experience_level == 'beginner':
             assets_to_add = price_service.get_beginner_portfolio_assets()
+        elif experience_level == 'some':
+            assets_to_add = price_service.get_some_experience_portfolio_assets()
+        elif experience_level == 'medium':
+            if needs_liquidity:
+                assets_to_add = price_service.get_medium_portfolio_with_liquidity()
+            else:
+                assets_to_add = price_service.get_medium_portfolio_no_liquidity()
+        elif experience_level == 'advanced':
+            if needs_liquidity:
+                assets_to_add = price_service.get_advanced_portfolio_with_liquidity()
+            else:
+                assets_to_add = price_service.get_advanced_portfolio_no_liquidity()
         elif use_default or not custom_assets:
             assets_to_add = DEFAULT_PORTFOLIO_ASSETS
         else:

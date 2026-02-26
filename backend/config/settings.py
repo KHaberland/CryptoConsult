@@ -3,16 +3,24 @@ Django settings for CryptoConsult project.
 """
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load .env from project root (один файл для всех ключей)
-load_dotenv(BASE_DIR.parent / '.env')
+# Версия приложения из единого источника (version.py в корне проекта)
+PROJECT_ROOT = BASE_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from version import __version__ as APP_VERSION
 
-# Load environment variables (fallback: .env в текущей папке)
+# Load .env: сначала корень проекта, затем backend/ (CRYPTOPANIC_API_KEY и др.)
+load_dotenv(BASE_DIR.parent / '.env')
+load_dotenv(BASE_DIR / '.env')  # backend/.env
+
+# Fallback: .env в текущей папке
 load_dotenv()
 
 # SECURITY WARNING: keep the secret key used in production secret!

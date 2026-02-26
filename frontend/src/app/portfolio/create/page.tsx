@@ -281,11 +281,14 @@ export default function CreatePortfolioPage() {
                       ? 'Хорошо, что вы включили стейблкоины — они снижают волатильность.'
                       : 'Рекомендуем добавить 5-10% стейблкоинов для снижения волатильности.'
                   } {
-                    createdAssets.find(a => a.symbol === 'BTC')?.percentage >= 30
-                      ? 'Bitcoin как основа портфеля — разумный выбор.'
-                      : createdAssets.find(a => a.symbol === 'BTC')
-                        ? 'Доля Bitcoin невелика — рассмотрите увеличение для стабильности.'
-                        : 'Отсутствие Bitcoin повышает риск портфеля.'
+                    (() => {
+                      const btc = createdAssets.find(a => a.symbol === 'BTC')
+                      return (btc?.percentage ?? 0) >= 30
+                        ? 'Bitcoin как основа портфеля — разумный выбор.'
+                        : btc
+                          ? 'Доля Bitcoin невелика — рассмотрите увеличение для стабильности.'
+                          : 'Отсутствие Bitcoin повышает риск портфеля.'
+                    })()
                   }
                 </p>
               </div>

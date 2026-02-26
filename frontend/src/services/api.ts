@@ -53,6 +53,24 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 )
 
+// ============ Version API ============
+
+export interface VersionResponse {
+  version: string
+  api_key_configured: boolean
+}
+
+export const versionApi = {
+  get: async (): Promise<string> => {
+    const response = await api.get<VersionResponse>('/version/')
+    return response.data.version
+  },
+  getFull: async (): Promise<VersionResponse> => {
+    const response = await api.get<VersionResponse>('/version/')
+    return response.data
+  },
+}
+
 // ============ Profile API ============
 
 export const profileApi = {
@@ -111,6 +129,7 @@ export const portfolioApi = {
     use_default_assets?: boolean
     custom_assets?: Array<{ symbol: string; name: string; percentage: number }>
     experience_level?: string
+    needs_liquidity?: boolean
   }) => {
     const response = await api.post('/portfolio/', data)
     return response.data
@@ -229,8 +248,14 @@ export const chatApi = {
     return response.data
   },
   
-  getMarketForecast: async () => {
-    const response = await api.get('/chat/forecast/')
+  getMarketForecast: async (days?: number) => {
+    const params = days ? { days } : {}
+    const response = await api.get('/chat/forecast/', { params })
+    return response.data
+  },
+
+  getBtcAnalysis: async () => {
+    const response = await api.get('/chat/btc-analysis/')
     return response.data
   },
 }

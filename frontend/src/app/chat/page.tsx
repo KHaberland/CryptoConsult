@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useSessionStore } from '@/store/sessionStore'
 import { useChatStore, RebalanceSuggestion } from '@/store/chatStore'
@@ -9,9 +9,11 @@ import { Header } from '@/components/layout/Header'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Alert } from '@/components/ui/Alert'
+import { ApiKeyBanner } from '@/components/ui/ApiKeyBanner'
 import { PortfolioRebalanceModal } from '@/components/portfolio/PortfolioRebalanceModal'
 import { formatDateTime } from '@/lib/utils'
-import { portfolioApi } from '@/services/api'
+import { portfolioApi, chatApi, versionApi } from '@/services/api'
+import { BtcAnalysisModal } from '@/components/forecast/BtcAnalysisModal'
 import {
   Send,
   Trash2,
@@ -41,10 +43,10 @@ const QUICK_COMMANDS = [
     tooltip: 'Анализ рисков вашего портфеля: волатильность, концентрация активов и потенциальные угрозы. Важно для понимания возможных потерь.',
   },
   {
-    cmd: '/market',
-    label: 'Рынок',
+    cmd: '/btc-analysis',
+    label: 'Анализ BTC',
     icon: '📈',
-    tooltip: 'Обзор рыночной ситуации: тренды, ключевые события и настроения. Контекст для принятия решений о покупке или продаже.',
+    tooltip: 'Глубокий анализ Bitcoin по шаблону Crypto Market Report: технические индикаторы, деривативы, он-чейн, макро, сценарный прогноз.',
   },
   {
     cmd: '/drawdown',
@@ -69,7 +71,7 @@ const QUICK_COMMANDS = [
 // Модульная переменная — сохраняется при remount в Strict Mode
 let lastProcessedUrlCmd: string | null = null
 
-export default function ChatPage() {
+function ChatContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { initSession, isReady } = useSessionStore()
@@ -92,6 +94,15 @@ export default function ChatPage() {
   const { portfolioValue, fetchPortfolioValue } = usePortfolioStore()
   
   const [input, setInput] = useState('')
+  const [showBtcAnalysisModal, setShowBtcAnalysisModal] = useState(false)
+  const [btcAnalysisData, setBtcAnalysisData] = useState<{
+    sections: Array<{ title: string; content: string }>
+    forecast_6months: string
+    buy_recommendation: string
+  } | null>(null)
+  const [btcAnalysisLoading, setBtcAnalysisLoading] = useState(false)
+  const [btcAnalysisError, setBtcAnalysisError] = useState<string | null>(null)
+  const [apiKeyConfigured, setApiKeyConfigured] = useState<boolean | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const lastShownRebalanceMsgId = useRef<number | null>(null)
@@ -109,6 +120,14 @@ export default function ChatPage() {
       fetchHistory()
     }
   }, [isReady, fetchProfile, fetchPortfolioValue, fetchHistory])
+
+  // Проверка наличия API ключа
+  useEffect(() => {
+    if (!isReady) return
+    versionApi.getFull()
+      .then((data) => setApiKeyConfigured(data.api_key_configured))
+      .catch(() => setApiKeyConfigured(null))
+  }, [isReady])
   
   // Редирект если нет профиля
   useEffect(() => {
@@ -120,11 +139,27 @@ export default function ChatPage() {
   // Обработка команды из URL (модульная переменная предотвращает двойной вызов в Strict Mode)
   useEffect(() => {
     const cmd = searchParams.get('cmd')
-    if (!cmd || !isReady || !hasProfile || isSending) return
+    if (!cmd || !isReady || !hasProfile) return
     if (lastProcessedUrlCmd === cmd) return
 
     lastProcessedUrlCmd = cmd
-    sendMessage(`/${cmd}`)
+    if (cmd === 'btc-analysis') {
+      setShowBtcAnalysisModal(true)
+      setBtcAnalysisData(null)
+      setBtcAnalysisError(null)
+      setBtcAnalysisLoading(true)
+      chatApi.getBtcAnalysis()
+        .then((data) => setBtcAnalysisData(data))
+        .catch((err: unknown) => {
+          const msg = err && typeof err === 'object' && 'response' in err
+            ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+            : null
+          setBtcAnalysisError(msg || 'Не удалось выполнить анализ BTC')
+        })
+        .finally(() => setBtcAnalysisLoading(false))
+    } else if (!isSending) {
+      sendMessage(`/${cmd}`)
+    }
     router.replace('/chat')
   }, [searchParams, isReady, hasProfile, isSending, sendMessage, router])
 
@@ -148,7 +183,25 @@ export default function ChatPage() {
     setInput('')
   }
   
-  const handleQuickCommand = (cmd: string) => {
+  const handleQuickCommand = async (cmd: string) => {
+    if (cmd === '/btc-analysis') {
+      setShowBtcAnalysisModal(true)
+      setBtcAnalysisData(null)
+      setBtcAnalysisError(null)
+      setBtcAnalysisLoading(true)
+      try {
+        const data = await chatApi.getBtcAnalysis()
+        setBtcAnalysisData(data)
+      } catch (err: unknown) {
+        const msg = err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : null
+        setBtcAnalysisError(msg || 'Не удалось выполнить анализ BTC')
+      } finally {
+        setBtcAnalysisLoading(false)
+      }
+      return
+    }
     if (isSending) return
     sendMessage(cmd)
   }
@@ -232,6 +285,15 @@ export default function ChatPage() {
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
       <Header />
       
+      {/* Модальное окно анализа BTC */}
+      <BtcAnalysisModal
+        isOpen={showBtcAnalysisModal}
+        onClose={() => setShowBtcAnalysisModal(false)}
+        data={btcAnalysisData}
+        isLoading={btcAnalysisLoading}
+        error={btcAnalysisError}
+      />
+
       {/* Модальное окно реструктуризации */}
       {rebalanceSuggestion && (
         <PortfolioRebalanceModal
@@ -245,6 +307,9 @@ export default function ChatPage() {
       
       <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-4 flex flex-col overflow-hidden">
         {/* Alerts */}
+        {apiKeyConfigured === false && (
+          <ApiKeyBanner variant="chat" className="mb-4" />
+        )}
         {error && (
           <Alert variant="error" className="mb-4">
             {error}
@@ -406,5 +471,17 @@ export default function ChatPage() {
         </form>
       </main>
     </div>
+  )
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <Loader2 className="w-12 h-12 animate-spin text-primary-600" />
+      </div>
+    }>
+      <ChatContent />
+    </Suspense>
   )
 }

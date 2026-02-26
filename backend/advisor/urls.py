@@ -7,6 +7,7 @@ from .views import (
     DrawdownAlertView,
     QuickCommandsView,
     MarketForecastView,
+    BtcAnalysisView,
 )
 
 urlpatterns = [
@@ -24,4 +25,6 @@ urlpatterns = [
     
     # Прогноз рынка на 6 месяцев
     path('forecast/', MarketForecastView.as_view(), name='market_forecast'),
+    # Глубокий анализ BTC (тренд 6 мес)
+    path('btc-analysis/', BtcAnalysisView.as_view(), name='btc_analysis'),
 ]

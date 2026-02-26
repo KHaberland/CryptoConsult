@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { TrendingUp, Shield, BarChart3, MessageCircle, ArrowRight } from 'lucide-react'
+import { APP_VERSION } from '@/version'
 
 export default function Home() {
   return (
@@ -73,7 +74,7 @@ export default function Home() {
           </Link>
           
           <p className="mt-4 text-sm text-gray-500">
-            Без регистрации • MVP версия
+            Без регистрации • v{APP_VERSION}
           </p>
         </div>
       </div>
@@ -85,6 +86,7 @@ export default function Home() {
           <br />
           Инвестиции в криптовалюты связаны с высоким риском.
         </p>
+        <p className="mt-2 text-xs text-gray-400">v{APP_VERSION}</p>
       </footer>
     </div>
   )

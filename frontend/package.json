@@ -1,8 +1,10 @@
 {
   "name": "crypto-consultant-frontend",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
+    "prebuild": "node scripts/sync-version.js",
+    "predev": "node scripts/sync-version.js",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

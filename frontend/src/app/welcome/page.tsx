@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -38,7 +38,7 @@ interface Analysis {
   recommendation: string
 }
 
-export default function WelcomePage() {
+function WelcomeContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { userName, initSession, isReady } = useSessionStore()
@@ -250,5 +250,20 @@ export default function WelcomePage() {
         </div>
       </div>
     </div>
+  )
+}
+
+export default function WelcomePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gradient-to-br from-primary-50 to-white flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 animate-spin text-primary-600 mx-auto mb-4" />
+          <p className="text-gray-600">Загрузка...</p>
+        </div>
+      </div>
+    }>
+      <WelcomeContent />
+    </Suspense>
   )
 }

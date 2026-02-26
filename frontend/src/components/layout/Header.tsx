@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { MessageCircle, LayoutDashboard, TrendingUp, LogOut, User } from 'lucide-react'
 import { useSessionStore } from '@/store/sessionStore'
+import { APP_VERSION } from '@/version'
 
 export function Header() {
   const pathname = usePathname()
@@ -27,6 +28,7 @@ export function Header() {
             <span className="text-xl font-bold text-primary-600 hidden sm:inline">
               Крипто-Консультант
             </span>
+            <span className="ml-2 text-xs text-gray-400 font-normal hidden sm:inline">v{APP_VERSION}</span>
           </Link>
           
           {/* Navigation */}

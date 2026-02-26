@@ -4,6 +4,7 @@
 
 import json
 import logging
+import math
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, List
@@ -17,6 +18,14 @@ from users.models import InvestorProfile
 from .models import ChatMessage
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt_inst_news(inst_dict: dict) -> str:
+    """Форматирование новостей CryptoPanic для контекста LLM."""
+    headlines = inst_dict.get("news_headlines") or []
+    if not headlines:
+        return "нет данных"
+    return "; ".join((h.get("title") or "")[:80] for h in headlines[:5])
 
 
 class PortfolioAnalyzer:
@@ -222,7 +231,11 @@ class AIAdvisorService:
     def __init__(self):
         api_key = settings.OPENAI_API_KEY
         if not api_key:
-            raise ValueError("OPENAI_API_KEY не настроен в settings")
+            raise ValueError(
+                "Введите свой API‑ключ в настройках. "
+                "Создайте файл backend/.env и добавьте OPENROUTER_API_KEY=ваш_ключ (или OPENAI_API_KEY). "
+                "См. шаблон в баннере на странице."
+            )
         
         # Поддержка OpenRouter и других провайдеров через base_url
         base_url = getattr(settings, 'OPENAI_BASE_URL', None)
@@ -440,23 +453,27 @@ class AIAdvisorService:
         
         return context
     
-    def get_market_forecast_6m(self) -> Dict:
+    def get_market_forecast(self, days: int = 180) -> Dict:
         """
-        Прогноз крипторынка на 6 месяцев вперёд.
+        Прогноз крипторынка на указанное количество дней вперёд.
         Возвращает 3 сценария: позитивный, негативный, базовый с вероятностями.
+        
+        Args:
+            days: горизонт прогноза (30, 90, 180 и т.д.)
         """
         market_context = self.get_market_context()
         
         portfolio_desc = (
             "BTC 50%, ETH 30%, USDT 10%, BNB 2%, XRP 2%, SOL 2%, DOGE 2%, ADA 2%"
         )
-        prompt = f"""Ты — крипто-консультант. Проанализируй текущую ситуацию на крипторынке и дай прогноз на 6 месяцев вперёд.
+        period_text = f"{days} дней" if days < 60 else f"{days // 30} месяцев"
+        prompt = f"""Ты — крипто-консультант. Проанализируй текущую ситуацию на крипторынке и дай прогноз на {period_text} вперёд.
 
 {market_context}
 
-Сформируй 3 сценария развития крипторынка на ближайшие 6 месяцев. Вероятности должны в сумме давать 100%.
+Сформируй 3 сценария развития крипторынка на ближайшие {period_text}. Вероятности должны в сумме давать 100%.
 
-Затем определи сценарий с НАИБОЛЬШЕЙ вероятностью и опиши, как будет вести себя базовый портфель ({portfolio_desc}) спустя полгода при этом сценарии.
+Затем определи сценарий с НАИБОЛЬШЕЙ вероятностью и опиши, как будет вести себя базовый портфель ({portfolio_desc}) спустя этот период при этом сценарии.
 
 Ответь СТРОГО в формате JSON (без markdown, без пояснений):
 {{
@@ -474,7 +491,7 @@ class AIAdvisorService:
   }},
   "portfolio_outlook": {{
     "most_likely_scenario": "positive" или "negative" или "base",
-    "description": "Как будет вести себя портфель спустя 6 месяцев при наиболее вероятном сценарии: ожидаемая динамика стоимости, поведение активов, риски и возможности (3-5 предложений)"
+    "description": "Как будет вести себя портфель спустя {period_text} при наиболее вероятном сценарии: ожидаемая динамика стоимости, поведение активов, риски и возможности (3-5 предложений)"
   }}
 }}
 
@@ -512,6 +529,7 @@ class AIAdvisorService:
                         )
             
             result = {
+                "days": days,
                 "positive": data.get("positive", {"description": "", "probability": 0}),
                 "negative": data.get("negative", {"description": "", "probability": 0}),
                 "base": data.get("base", {"description": "", "probability": 0}),
@@ -541,8 +559,9 @@ class AIAdvisorService:
                 }
             return result
         except Exception as e:
-            logger.error(f"Ошибка get_market_forecast_6m: {e}")
+            logger.error(f"Ошибка get_market_forecast ({days} дней): {e}")
             return {
+                "days": days,
                 "positive": {
                     "description": "Рост рынка на фоне институционального спроса и халвинга BTC.",
                     "probability": 35.0,
@@ -563,6 +582,418 @@ class AIAdvisorService:
                         "Стейблкоины обеспечат стабильность. Рекомендуется продолжать DCA."
                     ),
                 },
+            }
+    
+    def _compute_ema(self, prices: List[float], period: int) -> float:
+        """Экспоненциальная скользящая средняя."""
+        if not prices or period <= 0:
+            return 0.0
+        k = 2.0 / (period + 1)
+        ema = sum(prices[:period]) / min(period, len(prices))
+        for i in range(period, len(prices)):
+            ema = prices[i] * k + ema * (1 - k)
+        return ema
+    
+    def _compute_rsi(self, prices: List[float], period: int = 14) -> Optional[float]:
+        """RSI за последние period периодов."""
+        if len(prices) < period + 1:
+            return None
+        gains, losses = [], []
+        for i in range(1, period + 1):
+            change = prices[-i] - prices[-i - 1]
+            gains.append(max(change, 0))
+            losses.append(max(-change, 0))
+        avg_gain = sum(gains) / period
+        avg_loss = sum(losses) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+    
+    def _compute_atr(self, prices: List[float], period: int = 14) -> Optional[float]:
+        """ATR (Average True Range) — волатильность. Используем High-Low≈|close-close_prev|."""
+        if len(prices) < period + 1:
+            return None
+        tr_list = []
+        for i in range(1, len(prices)):
+            tr = abs(prices[i] - prices[i - 1])
+            tr_list.append(tr)
+        if len(tr_list) < period:
+            return None
+        atr = sum(tr_list[-period:]) / period
+        return atr
+    
+    def _compute_bollinger(self, prices: List[float], period: int = 20, k: float = 2.0) -> Optional[tuple]:
+        """Bollinger Bands: (middle, upper, lower, bandwidth_pct)."""
+        if len(prices) < period:
+            return None
+        slice_p = prices[-period:]
+        middle = sum(slice_p) / period
+        variance = sum((p - middle) ** 2 for p in slice_p) / period
+        std = math.sqrt(variance) if variance > 0 else 0
+        upper = middle + k * std
+        lower = middle - k * std
+        bandwidth = ((upper - lower) / middle * 100) if middle else 0
+        return (middle, upper, lower, bandwidth)
+    
+    def get_btc_analysis(self, session_id: Optional[str] = None) -> Dict:
+        """
+        Глубокий анализ Bitcoin по 10-раздельному шаблону Crypto Market Report.
+        Возвращает структурированный отчёт, сценарный прогноз, рекомендации и сигнал BUY/HOLD/REDUCE.
+        session_id: для персонализации рекомендаций по профилю инвестора.
+        """
+        # Данные за 200 дней для MA200
+        data = self.price_service.get_historical_prices_with_volumes("BTC", 200)
+        if not data:
+            data = self.price_service.get_historical_prices_with_volumes("BTC", 30)
+        if not data:
+            return {
+                "error": "Не удалось загрузить данные BTC. Попробуйте позже.",
+                "sections": [],
+                "scenario_forecast": None,
+                "profile_recommendations": None,
+                "forecast_6months": "",
+                "buy_recommendation": "",
+                "signal": "HOLD",
+                "signal_score": 0.0,
+                "signal_blocks": {},
+            }
+        
+        prices = [d["price"] for d in data]
+        volumes = [d["volume"] for d in data]
+        current_price = prices[-1] if prices else 0
+        price_30d_ago = prices[-30] if len(prices) >= 30 else prices[0] if prices else 0
+        price_change_30d = (
+            ((current_price - price_30d_ago) / price_30d_ago * 100)
+            if price_30d_ago else 0
+        )
+        avg_volume = sum(volumes) / len(volumes) if volumes else 0
+        recent_volume = sum(volumes[-7:]) / 7 if len(volumes) >= 7 else (volumes[-1] if volumes else 0)
+        
+        ma20 = sum(prices[-20:]) / 20 if len(prices) >= 20 else sum(prices) / len(prices)
+        ma50 = sum(prices[-50:]) / 50 if len(prices) >= 50 else sum(prices) / len(prices)
+        ma200 = sum(prices[-200:]) / 200 if len(prices) >= 200 else (sum(prices) / len(prices) if prices else 0)
+        ma_cross = "бычье" if ma20 > ma50 else "медвежье"
+        ma_cross_50_200 = "золотой крест" if ma50 > ma200 else "мёртвый крест"
+        
+        rsi = self._compute_rsi(prices)
+        rsi_val = rsi if rsi is not None else 50.0
+        rsi_zone = "перекупленности" if rsi_val > 70 else "перепроданности" if rsi_val < 30 else "нейтральной"
+        
+        atr = self._compute_atr(prices)
+        atr_val = atr if atr is not None else 0.0
+        bb = self._compute_bollinger(prices)
+        bb_str = ""
+        if bb:
+            bb_str = f"Bollinger: середина ${bb[0]:,.0f}, верх ${bb[1]:,.0f}, низ ${bb[2]:,.0f}, ширина полос {bb[3]:.1f}%"
+        
+        returns = []
+        for i in range(1, len(prices)):
+            if prices[i - 1] > 0:
+                returns.append((prices[i] - prices[i - 1]) / prices[i - 1] * 100)
+        volatility = math.sqrt(sum(r**2 for r in returns) / len(returns)) if returns else 0
+        
+        ema12 = self._compute_ema(prices, 12)
+        ema26 = self._compute_ema(prices, 26)
+        macd_line = ema12 - ema26
+        macd_signal = "бычий" if macd_line > 0 else "медвежий"
+        # MACD предыдущий период (для направления)
+        prices_prev = prices[:-1] if len(prices) > 1 else prices
+        ema12_prev = self._compute_ema(prices_prev, 12) if len(prices_prev) >= 12 else ema12
+        ema26_prev = self._compute_ema(prices_prev, 26) if len(prices_prev) >= 26 else ema26
+        macd_prev = ema12_prev - ema26_prev if (prices_prev and len(prices_prev) >= 26) else None
+        
+        # Профиль инвестора (для раздела 10)
+        profile = None
+        if session_id:
+            try:
+                profile = InvestorProfile.objects.get(session_id=session_id)
+            except InvestorProfile.DoesNotExist:
+                pass
+
+        # Fear & Greed, деривативы, он-чейн, макро, институции, сентимент
+        try:
+            from market_data import get_btc_derivatives, get_btc_onchain, get_macro_data, get_btc_institutions, get_btc_sentiment
+            deriv = get_btc_derivatives()
+            onchain = get_btc_onchain()
+            macro = get_macro_data(btc_prices=prices)
+            institutions = get_btc_institutions()
+            sentiment = get_btc_sentiment(institutions)
+        except ImportError:
+            deriv = None
+            onchain = None
+            macro = None
+            institutions = None
+            sentiment = None
+
+        fng_val = (sentiment or {}).get("fear_greed_value", 50)
+        fng_class = (sentiment or {}).get("fear_greed_classification", "Neutral")
+        funding_rate = deriv.get("funding_rate", 0.0) if deriv else 0.0
+        oi_usd = deriv.get("open_interest_usd", 0) if deriv else 0
+        oi_prev = deriv.get("open_interest_7d_ago_usd") if deriv else None
+
+        # Ликвидации лонгов: капитуляция → +1 для блока C
+        liquidations_long_signal = 0
+        liq = (deriv or {}).get("liquidations_7d")
+        if liq:
+            long_liq = liq.get("long_liquidations_usd", 0) or 0
+            short_liq = liq.get("short_liquidations_usd", 0) or 0
+            total = liq.get("total_usd", 0) or (long_liq + short_liq)
+            if total > 50_000_000 and long_liq > short_liq * 1.2:
+                liquidations_long_signal = 1
+
+        oc = onchain or {}
+        exchange_flow_signal = oc.get("exchange_flow_signal", 0)
+        lth_signal = oc.get("lth_signal", 0)
+        sopr_signal = oc.get("sopr_signal", 0)
+        macro_signal = (macro or {}).get("macro_signal", 0)
+        
+        # Структура: Higher High если цена > ma50 и ma50 > ma200
+        structure_signal = 0
+        if ma200 and ma200 > 0 and current_price > ma50 and ma50 > ma200:
+            structure_signal = 1
+        elif ma200 and ma200 > 0 and current_price < ma50 and ma50 < ma200:
+            structure_signal = -1
+        
+        # Переменные для f-строки (избегаем UnboundLocalError в условиях)
+        mc = macro or {}
+        inst = institutions or {}
+        s = sentiment or {}
+        news_instruction = (
+            "Новости доступны (с ограничением 24ч) — перечисли заголовки из контекста выше. "
+            if inst.get("news_headlines")
+            else "Новости недоступны (нужен API key). "
+        )
+
+        # DecisionScorer
+        try:
+            from .decision_scorer import DecisionScorer, ScorerInput
+            scorer = DecisionScorer()
+            inp = ScorerInput(
+                price=current_price,
+                ma20=ma20,
+                ma50=ma50,
+                ma200=ma200,
+                rsi=rsi_val,
+                macd_line=macd_line,
+                macd_prev=macd_prev,
+                funding_rate=funding_rate,
+                open_interest_usd=oi_usd,
+                open_interest_prev=oi_prev,
+                fear_greed_value=fng_val,
+                exchange_flow_signal=exchange_flow_signal,
+                lth_signal=lth_signal,
+                sopr_signal=sopr_signal,
+                macro_signal=macro_signal,
+                structure_signal=structure_signal,
+                liquidations_long_signal=liquidations_long_signal,
+            )
+            signal_score, signal, signal_blocks = scorer.compute(inp)
+        except Exception as e:
+            logger.warning(f"DecisionScorer: {e}")
+            signal_score, signal, signal_blocks = 0.0, "HOLD", {}
+        
+        data_context = f"""
+═══════════════════════════════════════
+📊 ДАННЫЕ BITCOIN (дневной + недельный таймфрейм)
+═══════════════════════════════════════
+• Текущая цена: ${current_price:,.2f}
+• Цена 30 дней назад: ${price_30d_ago:,.2f}
+• Изменение за 30 дней: {price_change_30d:+.2f}%
+• Средний объём: ${avg_volume:,.0f}
+• Объём последние 7 дней: ${recent_volume:,.0f}
+• MA(20): ${ma20:,.2f}
+• MA(50): ${ma50:,.2f}
+• MA(200): ${ma200:,.2f}
+• Пересечение MA20/MA50: {ma_cross}
+• MA50/MA200: {ma_cross_50_200}
+• RSI(14): {rsi_val:.1f} (зона {rsi_zone})
+• MACD: {macd_signal} (линия: {macd_line:+.2f})
+• ATR(14): ${atr_val:,.0f}
+• {bb_str}
+• Волатильность (дневная): {volatility:.2f}%
+• Funding Rate (8h): {funding_rate:.4%}
+• Open Interest (USD): ${oi_usd:,.0f}
+• Open Interest 7д назад: ${(deriv or {}).get('open_interest_7d_ago_usd', oi_usd):,.0f}
+• Изменение OI за 7д: {(deriv or {}).get('open_interest_7d_change_pct', 0):+.1f}%
+• Long/Short ratio: {(deriv or {}).get('long_short_ratio', 1.0):.2f} (лонги {(deriv or {}).get('long_account_pct', 50):.1f}% / шорты {(deriv or {}).get('short_account_pct', 50):.1f}%)
+• Ликвидации 7д: {f"${((deriv or {}).get('liquidations_7d') or {}).get('total_usd', 0):,.0f}" if (deriv or {}).get('liquidations_7d') else 'нет данных (нужен COINGLASS_API_KEY)'}
+• Вывод по деривативам: {(deriv or {}).get('interpretation', 'нейтральный') or 'нет данных'}
+• Active addresses (24h): {(onchain or {}).get('active_addresses', 0):,.0f}
+• Active addresses 7д ср.: {(onchain or {}).get('active_addresses_7d_avg', 0):,.0f}
+• Транзакций 24h: {(onchain or {}).get('transactions_24h', 0):,.0f}
+• MVRV: {(onchain or {}).get('mvrv') or "нет данных (для MVRV и SOPR в вашем проекте нужен платный Glassnode API или реализация расчёта по открытым данным)"}
+• SOPR: {(onchain or {}).get('sopr') or "нет данных (для MVRV и SOPR в вашем проекте нужен платный Glassnode API или реализация расчёта по открытым данным)"}
+• Exchange inflow BTC: {(onchain or {}).get('exchange_inflow_btc') or 'нет данных'}
+• Exchange outflow BTC: {(onchain or {}).get('exchange_outflow_btc') or 'нет данных'}
+• LTH supply %: {(onchain or {}).get('lth_supply_pct') or 'нет данных'}
+• Вывод по он-чейн: {(onchain or {}).get('interpretation', 'нет данных')}
+
+6. МАКРОЭКОНОМИКА (Liquidity Environment) — используй эти данные в разделе 6:
+• ФРС (Fed Funds Rate): {f"{mc.get('fed_funds_rate'):.2f}%" if mc.get('fed_funds_rate') is not None else 'нет данных'}
+• 10Y Treasury: {f"{mc.get('treasury_10y'):.2f}%" if mc.get('treasury_10y') is not None else 'нет данных'}
+• DXY (индекс доллара): {f"{mc.get('dxy'):.2f}" if mc.get('dxy') is not None else 'нет данных'}
+• Изменение DXY 30д: {f"{mc.get('dxy_30d_change_pct'):+.1f}%" if mc.get('dxy_30d_change_pct') is not None else 'нет данных'}
+• S&P 500: {f"{mc.get('sp500'):,.0f}" if mc.get('sp500') is not None else 'нет данных'}
+• Корреляция BTC-S&P500: {f"{mc.get('sp500_btc_correlation'):.2f}" if mc.get('sp500_btc_correlation') is not None else 'нет данных'}
+• Вывод по макро: {mc.get('interpretation', 'нет данных')}
+• ETF: {inst.get('etf_count', 0)} фондов, AUM ${inst.get('total_aum_usd', 0) / 1e9:.1f}B
+• ETF поток 1д: ${inst.get('flow_1d_usd', 0) / 1e6:+.0f}M, 7д: ${inst.get('flow_7d_usd', 0) / 1e6:+.0f}M
+• Институциональный вывод (ETF): {inst.get('etf_interpretation', 'нет данных')}
+• Новости (CryptoPanic): {_fmt_inst_news(inst)}
+• Сводка институций: {inst.get('summary', 'нет данных')}
+
+8. СЕНТИМЕНТ:
+• Fear & Greed Index: {s.get('fear_greed_value', 50)} ({s.get('fear_greed_classification', 'нейтрально')})
+• Интерпретация F&G: {s.get('fear_greed_interpretation', 'нет данных')}
+• Медийный фон: {s.get('news_sentiment', {}).get('interpretation', 'нет данных')} (позитив/негатив/нейтр: +{s.get('news_sentiment', {}).get('positive', 0)}/-{s.get('news_sentiment', {}).get('negative', 0)}/{s.get('news_sentiment', {}).get('neutral', 0)})
+• Сводка сентимента: {s.get('summary', 'нет данных')}
+"""
+
+        profile_ctx = ""
+        if profile:
+            profile_ctx = f"""
+ПРОФИЛЬ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ (для персонализации раздела 10):
+• Горизонт: {profile.investment_horizon} лет
+• Сумма: ${profile.investment_amount:,.0f}
+• Допустимая просадка: {profile.max_drawdown}%
+• Уровень опыта: {profile.get_experience_level_display()}
+• DCA: {'да' if profile.use_dca else 'нет'}
+• Нужна ликвидность: {'да' if profile.needs_liquidity else 'нет'}
+Определи тип профиля пользователя (консервативный/умеренный/агрессивный) по max_drawdown и experience_level.
+"""
+        
+        prompt = f"""Ты — крипто-консультант. Проведи профессиональный анализ Bitcoin по шаблону Crypto Market Report.
+
+{data_context}
+{profile_ctx}
+
+СТРУКТУРА ОТВЕТА (10 разделов). Ответь СТРОГО в формате JSON (без markdown):
+
+{{
+  "executive_summary": "5-7 строк: текущий тренд, стадия цикла, основной риск, драйвер роста, базовый сценарий на 6 мес",
+  "sections": [
+    {{"title": "2. Рыночная структура (Market Structure)", "content": "Higher High/Lower Low, уровни поддержки/сопротивления, вывод: бычья/нейтральная/медвежья"}},
+    {{"title": "3. Технические индикаторы (Momentum & Trend)", "content": "MA50/MA200, RSI, MACD, ATR, Bollinger — интерпретация"}},
+    {{"title": "4. Деривативы (Risk & Leverage)", "content": "Funding Rate, Open Interest — рынок перегружен лонгами/очищен/нейтральный"}},
+    {{"title": "5. Он-чейн аналитика (Network Health)", "content": "Active addresses, exchange flow, MVRV, SOPR — накопление/распределение/капитуляция. Когда MVRV/SOPR отсутствуют — укажи в скобках: для MVRV и SOPR в вашем проекте нужен платный Glassnode API или реализация расчёта по открытым данным"}},
+    {{"title": "6. Макроэкономика (Liquidity Environment)", "content": "ОБЯЗАТЕЛЬНО используй фактические данные из блока '6. МАКРОЭКОНОМИКА' выше (ФРС, 10Y Treasury, DXY, S&P 500, корреляция). Если данные есть — включи числа и вывод по макро. Если везде 'нет данных' — укажи отсутствие данных."}},
+    {{"title": "7. Институциональный фактор", "content": "ETF притоки/оттоки (если есть), крупные покупки, регуляторные события. {news_instruction}Ограничения: анализ ETF недоступен без платного API key."}},
+    {{"title": "8. Сентимент", "content": "Fear & Greed, соцсети, медийный фон — страх/апатия/эйфория"}},
+    {{"title": "9. Сценарный прогноз", "content": "Краткое резюме трёх сценариев (см. scenario_forecast)"}},
+    {{"title": "10. Инвестиционные рекомендации по профилю", "content": "Краткое резюме (см. profile_recommendations)"}}
+  ],
+  "profile_recommendations": {{
+    "conservative": {{"allocation": "70% BTC, 20% ETH, 10% стейбл", "description": "Для консервативных инвесторов"}},
+    "moderate": {{"allocation": "60% BTC, 25% ETH, 15% альты", "description": "Для умеренных инвесторов"}},
+    "aggressive": {{"allocation": "50% BTC, 30% ETH, 20% альты", "description": "Для агрессивных инвесторов"}},
+    "user_profile_type": "консервативный/умеренный/агрессивный — тип профиля текущего пользователя",
+    "user_recommendation": "Персонализированная рекомендация для текущего пользователя (2-4 предложения)"
+  }},
+  "scenario_forecast": {{
+    "base": {{"probability": 60, "description": "Описание базового сценария на 6 мес", "price_range": "Диапазон цен BTC (напр. $90k-$120k)"}},
+    "bullish": {{"probability": 25, "description": "Условия реализации альтернативного бычьего сценария", "conditions": "Условия (например: смягчение ФРС, рост ETF)"}},
+    "negative": {{"probability": 15, "description": "Описание негативного сценария", "triggers": "Триггеры падения (напр. ужесточение ФРС, регуляторные риски)"}}
+  }},
+  "forecast_6months": "Прогноз на 6 месяцев (3-5 предложений)",
+  "buy_recommendation": "Стоит ли покупать BTC сейчас? Да/нет, обоснование (2-4 предложения)"
+}}
+
+Важно: отвечай только валидным JSON."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Ты — крипто-консультант. Отвечай только валидным JSON без markdown."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=3500,
+                temperature=0.5,
+            )
+            text = response.choices[0].message.content.strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(lines[1:-1]) if lines else text
+            data_out = json.loads(text)
+            
+            sections = []
+            exec_summary = data_out.get("executive_summary", "")
+            if exec_summary:
+                sections.append({"title": "1. Резюме (Executive Summary)", "content": str(exec_summary)})
+            raw_sections = data_out.get("sections", [])
+            if isinstance(raw_sections, list):
+                for s in raw_sections:
+                    if isinstance(s, dict) and s.get("title"):
+                        sections.append({
+                            "title": str(s.get("title", "")),
+                            "content": str(s.get("content", "")),
+                        })
+
+            scenario_forecast = data_out.get("scenario_forecast")
+
+
+            def _normalize_scenario(sc: dict) -> dict:
+                if not isinstance(sc, dict):
+                    return {}
+                return {
+                    "probability": sc.get("probability", 0),
+                    "description": sc.get("description", ""),
+                    "price_range": sc.get("price_range", ""),
+                    "conditions": sc.get("conditions", ""),
+                    "triggers": sc.get("triggers", ""),
+                }
+
+            if scenario_forecast and isinstance(scenario_forecast, dict):
+                scenario_forecast = {
+                    "base": _normalize_scenario(scenario_forecast.get("base", {})),
+                    "bullish": _normalize_scenario(scenario_forecast.get("bullish", {})),
+                    "negative": _normalize_scenario(scenario_forecast.get("negative", {})),
+                }
+            else:
+                scenario_forecast = None
+
+            def _normalize_profile_rec(pr: dict) -> dict:
+                if not isinstance(pr, dict):
+                    return {}
+                return {
+                    "allocation": pr.get("allocation", ""),
+                    "description": pr.get("description", ""),
+                }
+
+            pr_raw = data_out.get("profile_recommendations")
+            profile_recommendations = None
+            if pr_raw and isinstance(pr_raw, dict):
+                profile_recommendations = {
+                    "conservative": _normalize_profile_rec(pr_raw.get("conservative", {})),
+                    "moderate": _normalize_profile_rec(pr_raw.get("moderate", {})),
+                    "aggressive": _normalize_profile_rec(pr_raw.get("aggressive", {})),
+                    "user_profile_type": pr_raw.get("user_profile_type", ""),
+                    "user_recommendation": pr_raw.get("user_recommendation", ""),
+                }
+
+            return {
+                "sections": sections,
+                "scenario_forecast": scenario_forecast,
+                "profile_recommendations": profile_recommendations,
+                "forecast_6months": str(data_out.get("forecast_6months") or ""),
+                "buy_recommendation": str(data_out.get("buy_recommendation") or ""),
+                "signal": signal,
+                "signal_score": round(signal_score, 2),
+                "signal_blocks": signal_blocks,
+            }
+        except Exception as e:
+            logger.error(f"Ошибка get_btc_analysis: {e}")
+            return {
+                "error": "Не удалось выполнить анализ. Попробуйте позже.",
+                "sections": [],
+                "scenario_forecast": None,
+                "profile_recommendations": None,
+                "forecast_6months": "",
+                "buy_recommendation": "",
+                "signal": "HOLD",
+                "signal_score": 0.0,
+                "signal_blocks": {},
             }
     
     def process_quick_command(self, command: str) -> Optional[str]:

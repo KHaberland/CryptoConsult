@@ -1,6 +1,26 @@
 import { create } from 'zustand'
 import { portfolioApi, profileApi } from '@/services/api'
 
+/** Преобразование ошибок валидации API в читаемую строку */
+function formatApiError(error: any, fallback: string): string {
+  const data = error?.response?.data
+  if (!data) return fallback
+  if (typeof data.detail === 'string') return data.detail
+  // Ошибки валидации: { field: ['msg1', 'msg2'], ... }
+  if (typeof data === 'object' && !Array.isArray(data)) {
+    const messages: string[] = []
+    for (const [field, msgs] of Object.entries(data)) {
+      if (Array.isArray(msgs)) {
+        messages.push(...msgs.map((m: unknown) => String(m)))
+      } else if (typeof msgs === 'string') {
+        messages.push(msgs)
+      }
+    }
+    if (messages.length > 0) return messages.join('. ')
+  }
+  return fallback
+}
+
 interface Asset {
   symbol: string
   name: string
@@ -68,7 +88,7 @@ interface PortfolioState {
   fetchProfile: () => Promise<void>
   createProfile: (data: Omit<InvestorProfile, 'id'>) => Promise<void>
   fetchPortfolioValue: (force?: boolean) => Promise<void>
-  createPortfolio: (data: { name: string; initial_amount: number; target_years: number; experience_level?: string }) => Promise<void>
+  createPortfolio: (data: { name: string; initial_amount: number; target_years: number; experience_level?: string; needs_liquidity?: boolean }) => Promise<void>
   contribute: (amount: number) => Promise<void>
   withdraw: (assets: Array<{ symbol: string; units_to_sell: number }>) => Promise<void>
   clearError: () => void
@@ -124,10 +144,11 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
   createProfile: async (data) => {
     set({ isLoading: true, error: null })
     try {
-      const profile = await profileApi.create(data)
+      const payload = { ...data, dca_parts: data.dca_parts ?? undefined }
+      const profile = await profileApi.create(payload)
       set({ profile, hasProfile: true, isLoading: false })
     } catch (error: any) {
-      const message = error.response?.data?.detail || 'Ошибка создания профиля'
+      const message = formatApiError(error, 'Ошибка создания профиля')
       set({ error: message, isLoading: false })
       throw error
     }
@@ -168,11 +189,11 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
   createPortfolio: async (data) => {
     set({ isLoading: true, error: null })
     try {
-      await portfolioApi.create({ ...data, use_default_assets: true, experience_level: data.experience_level })
+      await portfolioApi.create({ ...data, use_default_assets: true, experience_level: data.experience_level, needs_liquidity: data.needs_liquidity })
       const value = await portfolioApi.getValue()
       set({ portfolioValue: value, hasPortfolio: true, isLoading: false, lastFetchTime: Date.now() })
     } catch (error: any) {
-      const message = error.response?.data?.detail || 'Ошибка создания портфеля'
+      const message = formatApiError(error, 'Ошибка создания портфеля')
       set({ error: message, isLoading: false })
       throw error
     }
@@ -185,7 +206,7 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
       const value = await portfolioApi.getValue()
       set({ portfolioValue: value, isLoading: false, lastFetchTime: Date.now() })
     } catch (error: any) {
-      const message = error.response?.data?.detail || 'Ошибка внесения взноса'
+      const message = formatApiError(error, 'Ошибка внесения взноса')
       set({ error: message, isLoading: false })
       throw error
     }
@@ -198,7 +219,7 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
       const value = await portfolioApi.getValue()
       set({ portfolioValue: value, isLoading: false, lastFetchTime: Date.now() })
     } catch (error: any) {
-      const message = error.response?.data?.detail || 'Ошибка вывода средств'
+      const message = formatApiError(error, 'Ошибка вывода средств')
       set({ error: message, isLoading: false })
       throw error
     }

@@ -10,86 +10,22 @@ import { Alert } from '@/components/ui/Alert'
 import { Progress } from '@/components/ui/Progress'
 import { Slider } from '@/components/ui/Slider'
 import { Input } from '@/components/ui/Input'
-import { CheckCircle, TrendingUp, TrendingDown, Minus, Wallet, CalendarCheck } from 'lucide-react'
+import { CheckCircle, TrendingUp, CalendarCheck } from 'lucide-react'
 import {
-  LineChart,
-  Line,
   BarChart,
   Bar,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
 } from 'recharts'
-import { chatApi } from '@/services/api'
+import { chatApi, versionApi } from '@/services/api'
 import { formatCurrency } from '@/lib/utils'
 import { getDcaEntriesWithCumulative } from '@/lib/dca'
-
-// Генерация данных для графика прогноза (от сегодня на 6 месяцев)
-// Паттерн волатильности на основе реального графика BTC за 6 мес (авг 2025 — фев 2026)
-// Нормализованные точки: t (0..1) -> индекс от начальной цены (100 = старт)
-// Реальный BTC: пик ~106% в мес 1.5, коррекция до ~80%, новый пик, обвал до ~53%, отскок до ~57%
-const BTC_PATTERN: Array<[number, number]> = [
-  [0, 100], [0.04, 98], [0.08, 95], [0.12, 97], [0.17, 100], [0.21, 96], [0.25, 101],
-  [0.29, 105], [0.33, 96], [0.38, 91], [0.42, 94], [0.46, 91], [0.50, 80], [0.54, 77],
-  [0.58, 74], [0.63, 75], [0.67, 76], [0.71, 80], [0.75, 77], [0.79, 75], [0.83, 74],
-  [0.88, 67], [0.92, 55], [0.96, 56], [1, 57],
-]
-
-const lerp = (a: number, b: number, t: number) => a + (b - a) * t
-
-// Интерполяция по паттерну BTC
-const btcPatternAt = (t: number): number => {
-  if (t <= 0) return BTC_PATTERN[0][1]
-  if (t >= 1) return BTC_PATTERN[BTC_PATTERN.length - 1][1]
-  for (let i = 0; i < BTC_PATTERN.length - 1; i++) {
-    const [t0, v0] = BTC_PATTERN[i]
-    const [t1, v1] = BTC_PATTERN[i + 1]
-    if (t >= t0 && t <= t1) return lerp(v0, v1, (t - t0) / (t1 - t0))
-  }
-  return 100
-}
-
-// Масштабирование паттерна BTC под сценарий: start=100, end=targetEnd
-const scalePattern = (t: number, targetEnd: number): number => {
-  const raw = btcPatternAt(t)
-  // Паттерн идёт 100 -> 57. Масштабируем в 100 -> targetEnd
-  const progress = (raw - 100) / (57 - 100)
-  return 100 + progress * (targetEnd - 100)
-}
-
-type ChartPoint = {
-  month: string
-  base: number
-  positive: number
-  negative: number
-  mostProbable: number
-}
-
-const generateForecastChartData = (
-  mostLikely: 'positive' | 'negative' | 'base'
-): ChartPoint[] => {
-  const today = new Date()
-  const points: ChartPoint[] = []
-  const steps = 24
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps
-    const d = new Date(today)
-    d.setDate(d.getDate() + Math.round((180 * i) / steps))
-    const monthStr = d.toLocaleDateString('ru-RU', { month: 'short', day: 'numeric' })
-    // Позитивный: паттерн BTC, но масштаб 100 -> 138
-    const positive = scalePattern(t, 138)
-    // Негативный: паттерн BTC, масштаб 100 -> 72
-    const negative = scalePattern(t, 72)
-    // Базовый: паттерн BTC, масштаб 100 -> 102 (боковик с волатильностью)
-    const base = scalePattern(t, 102)
-    const mostProbable = mostLikely === 'positive' ? positive : mostLikely === 'negative' ? negative : base
-    points.push({ month: monthStr, base, positive, negative, mostProbable })
-  }
-  return points
-}
+import { BtcAnalysisContent } from '@/components/forecast/BtcAnalysisContent'
+import type { BtcAnalysisData } from '@/components/forecast/BtcAnalysisModal'
+import { ApiKeyBanner } from '@/components/ui/ApiKeyBanner'
 
 // Динамические AI-комментарии для горизонта инвестирования
 const getHorizonComment = (years: number): string => {
@@ -144,19 +80,45 @@ const getLiquidityComment = (needsLiquidity: boolean): string => {
   return `«Нет, могу держать весь портфель без вывода»\n\nЭтот ответ говорит о готовности заморозить капитал ради потенциально большей доходности.\n\nКак это влияет на портфель:\n• можно увеличить долю альтов\n• допускаются менее ликвидные активы\n• возможны долгосрочные стратегии без доступа к средствам\n\nДля кого подходит:\n• опытные инвесторы\n• те, у кого есть финансовая подушка вне крипты\n• люди, понимающие циклы и готовые долго ждать\n\nПочему это работает:\nОтсутствие необходимости вывода позволяет не реагировать на краткосрочные движения рынка и даёт шанс досидеть до полного цикла, где и формируется основная прибыль.\n\nБольшинство людей переоценивают свою способность «держать без вывода». Поэтому для 70–80% инвесторов ответ «Да, хочу возможность частичного вывода» — более зрелый, а не более слабый.`
 }
 
-// Динамические комментарии для опыта инвестирования
+// Динамические комментарии для опыта инвестирования (с лимитами по уровню)
 const getExperienceComment = (level: string): string => {
+  const lim = getLimits(level)
+  const dcaRange = lim.dcaPartsMin === lim.dcaPartsMax
+    ? `${lim.dcaPartsMin} части`
+    : `${lim.dcaPartsMin}–${lim.dcaPartsMax} частей`
   switch (level) {
     case 'beginner':
-      return `Новичок, раньше не инвестировал\n\nВы ещё не сталкивались с резкими падениями и не знаете, как рынок ведёт себя в стрессовых фазах.\n\nНа что это влияет:\n• портфель будет более консервативным\n• просадки ограничены\n• акцент на сохранение капитала и обучение`
+      return `Новичок, раньше не инвестировал\n\nВы ещё не сталкивались с резкими падениями и не знаете, как рынок ведёт себя в стрессовых фазах.\n\nОграничения для вашего уровня:\n• Макс. сумма вклада: $${lim.maxAmount.toLocaleString()}\n• Горизонт: до ${lim.maxHorizon} лет\n• Вход в рынок: ${dcaRange}`
     case 'some':
-      return `Немного опыта, пару сделок\n\nВы знакомы с рынком, но ещё не прожили полноценный рыночный цикл.\n\nНа что это влияет:\n• умеренный уровень риска\n• ограниченная доля волатильных активов\n• защита от перегрузки портфеля альтами`
+      return `Немного опыта, пару сделок\n\nВы знакомы с рынком, но ещё не прожили полноценный рыночный цикл.\n\nОграничения для вашего уровня:\n• Макс. сумма вклада: $${lim.maxAmount.toLocaleString()}\n• Горизонт: до ${lim.maxHorizon} лет\n• Вход в рынок: ${dcaRange} (фиксировано, без возможности изменения)\n• Макс. просадка: ${lim.maxDrawdown ?? 30}%`
     case 'medium':
-      return `Средний опыт, понимание рынка\n\nВы понимаете цикличность рынка и знаете, что временные просадки — нормальная часть инвестирования.\n\nНа что это влияет:\n• больше свободы в выборе активов\n• допускается более высокая волатильность\n• портфель может быть сбалансированным`
+      return `Средний опыт, понимание рынка\n\nВы понимаете цикличность рынка и знаете, что временные просадки — нормальная часть инвестирования.\n\nОграничения для вашего уровня:\n• Макс. сумма вклада: $${lim.maxAmount.toLocaleString()}\n• Горизонт: до ${lim.maxHorizon} лет\n• Вход в рынок: ${dcaRange} (сбалансированный портфель, преимущественно консервативные активы, немного умеренных рисков)`
     case 'advanced':
-      return `Продвинутый, делал регулярные инвестиции\n\nВы осознанно принимаете риск и умеете придерживаться стратегии даже в сложных фазах рынка.\n\nНа что это влияет:\n• доступ к агрессивным портфелям\n• более глубокие допустимые просадки\n• долгосрочные стратегии без жёстких ограничений`
+      return `Продвинутый, делал регулярные инвестиции\n\nВы осознанно принимаете риск и умеете придерживаться стратегии даже в сложных фазах рынка.\n\nОграничения для вашего уровня:\n• Макс. сумма вклада: $${lim.maxAmount.toLocaleString()}\n• Горизонт: до ${lim.maxHorizon} лет\n• Вход в рынок: ${dcaRange} (консервативная стратегия с возможностью небольших долей более рискованных активов)`
     default:
       return 'Опыт не обязателен, сервис работает для всех уровней.'
+  }
+}
+
+// Динамический комментарий для состава портфеля (зависит от уровня опыта и ликвидности)
+const getPortfolioComment = (experienceLevel: string, needsLiquidity?: boolean): string => {
+  switch (experienceLevel) {
+    case 'beginner':
+      return 'Базовый портфель: BTC 50%, ETH 30%, USDT 10%, BNB (2%), XRP (2%), SOL (2%), DOGE (2%), ADA (2%)'
+    case 'some':
+      return 'Базовый портфель: BTC 50%, ETH 20%, USDT 10%, BNB (4%), SOL (4%), XRP (4%), ADA (4%), DOGE (4%)'
+    case 'medium':
+      if (needsLiquidity) {
+        return 'Базовый портфель (частичный вывод): BTC 50%, ETH 25%, стейблкоины 15%, инфраструктура 10% (5 альтов по 2%)'
+      }
+      return 'Базовый портфель (жёсткий холд 5 лет): BTC 55%, ETH 30%, SOL 10%, инфраструктура 5%'
+    case 'advanced':
+      if (needsLiquidity) {
+        return 'Базовый портфель (частичный вывод): BTC 45%, ETH 25%, стейбл 10%, SOL 10%, Chainlink 5%, спекулятивный 5%'
+      }
+      return 'Базовый портфель (жёсткий холд 7 лет): BTC 40%, ETH 30%, SOL 15%, Chainlink 7%, DOGE 5%, экспериментальный 3%'
+    default:
+      return 'Базовый портфель: BTC 50%, ETH 25%, BNB 7.5%, SOL 7.5%, USDT 10%'
   }
 }
 
@@ -210,6 +172,23 @@ const getDcaSchedule = (parts: number, baseDate: Date): string => {
   }
   return lines.join('\n')
 }
+
+// Ограничения по уровням опыта инвестора
+const EXPERIENCE_LEVEL_LIMITS: Record<string, {
+  maxAmount: number
+  maxHorizon: number
+  dcaPartsMin: number
+  dcaPartsMax: number
+  maxDrawdown?: number
+}> = {
+  beginner: { maxAmount: 5000, maxHorizon: 3, dcaPartsMin: 3, dcaPartsMax: 3, maxDrawdown: 10 },
+  some: { maxAmount: 7000, maxHorizon: 4, dcaPartsMin: 4, dcaPartsMax: 4, maxDrawdown: 30 },
+  medium: { maxAmount: 15000, maxHorizon: 5, dcaPartsMin: 4, dcaPartsMax: 5 },
+  advanced: { maxAmount: 50000, maxHorizon: 7, dcaPartsMin: 5, dcaPartsMax: 6 },
+}
+
+const getLimits = (experienceLevel: string) =>
+  EXPERIENCE_LEVEL_LIMITS[experienceLevel] ?? EXPERIENCE_LEVEL_LIMITS.beginner
 
 // График дат и сумм по входам (для новичка: сумма разбита на части)
 const getDcaScheduleWithAmounts = (parts: number, amount: number, baseDate: Date): string => {
@@ -342,7 +321,7 @@ const QUESTIONS = [
     ],
     default: true,
     dynamicComment: true,
-    condition: (answers: any) => answers.experience_level !== 'beginner',
+    condition: (answers: any) => answers.experience_level !== 'beginner' && answers.experience_level !== 'some',
   },
   {
     id: 'dca_parts',
@@ -361,8 +340,9 @@ const QUESTIONS = [
     id: 'use_default_portfolio',
     title: 'Состав портфеля',
     question: 'Хотите использовать базовый портфель?',
-    comment: 'Базовый портфель: BTC 50%, ETH 30%, USDT 10%, BNB (2%), XRP (2%), SOL (2%), DOGE (2%), ADA (2%)',
+    comment: '',
     type: 'boolean',
+    dynamicComment: true,
     options: [
       { value: true, label: 'Да, использовать базовый портфель' },
       { value: false, label: 'Нет, хочу настроить самостоятельно' },
@@ -371,9 +351,9 @@ const QUESTIONS = [
   },
   {
     id: 'market_analysis',
-    title: 'Анализ крипторынка',
-    question: 'Прогноз на 6 месяцев вперёд',
-    comment: 'На основе актуальных рыночных данных и криптоконсультанта',
+    title: 'Анализ Биткойна',
+    question: 'Профессиональный анализ BTC по плану Crypto Market Report',
+    comment: '10 разделов: рыночная структура, индикаторы, деривативы, он-чейн, макро, сценарный прогноз, рекомендации',
     type: 'display',
     condition: (answers: any) => answers.use_default_portfolio === true,
   },
@@ -387,16 +367,9 @@ export default function QuestionnairePage() {
   const [currentStep, setCurrentStep] = useState(0)
   const [answers, setAnswers] = useState<Record<string, any>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [marketForecast, setMarketForecast] = useState<{
-    positive: { description: string; probability: number }
-    negative: { description: string; probability: number }
-    base: { description: string; probability: number }
-    portfolio_outlook?: {
-      most_likely_scenario: string
-      description: string
-    }
-  } | null>(null)
-  const [forecastLoading, setForecastLoading] = useState(false)
+  const [btcAnalysis, setBtcAnalysis] = useState<BtcAnalysisData | null>(null)
+  const [btcAnalysisLoading, setBtcAnalysisLoading] = useState(false)
+  const [apiKeyConfigured, setApiKeyConfigured] = useState<boolean | null>(null)
   
   // Инициализация сессии
   useEffect(() => {
@@ -437,14 +410,22 @@ export default function QuestionnairePage() {
           defaults[q.id] = q.default
         }
       })
-      // Ограничения для новичка: ликвидность да, DCA да, 3 части; лимиты по горизонту, сумме, просадке
+      const levelLimits = getLimits(defaults.experience_level ?? 'beginner')
       if (defaults.experience_level === 'beginner') {
         defaults.needs_liquidity = true
         defaults.use_dca = true
         defaults.dca_parts = 3
-        defaults.investment_horizon = Math.min(defaults.investment_horizon ?? 3, 3)
-        defaults.investment_amount = Math.min(defaults.investment_amount ?? 10000, 5000)
-        defaults.max_drawdown = Math.min(defaults.max_drawdown ?? 30, 10)
+      }
+      if (defaults.experience_level === 'some') {
+        defaults.use_dca = true
+        defaults.dca_parts = 4
+        defaults.needs_liquidity = true
+      }
+      defaults.investment_horizon = Math.min(defaults.investment_horizon ?? 3, levelLimits.maxHorizon)
+      defaults.investment_amount = Math.min(defaults.investment_amount ?? 10000, levelLimits.maxAmount)
+      defaults.dca_parts = Math.min(Math.max(defaults.dca_parts ?? 4, levelLimits.dcaPartsMin), levelLimits.dcaPartsMax)
+      if (levelLimits.maxDrawdown != null) {
+        defaults.max_drawdown = Math.min(defaults.max_drawdown ?? 30, levelLimits.maxDrawdown)
       }
       return defaults
     })
@@ -472,34 +453,66 @@ export default function QuestionnairePage() {
   const currentQuestion = visibleQuestions[currentStep]
   const progress = ((currentStep + 1) / visibleQuestions.length) * 100
   
+  const limits = getLimits(answers.experience_level ?? 'beginner')
   const isBeginner = answers.experience_level === 'beginner'
+  const isSomeLevel = answers.experience_level === 'some'
   
-  // Загрузка прогноза рынка при переходе на шаг анализа
+  // Загрузка анализа Биткойна при переходе на шаг анализа (сначала проверяем API ключ)
   useEffect(() => {
-    if (currentQuestion?.id === 'market_analysis' && !marketForecast && !forecastLoading) {
-      setForecastLoading(true)
-      chatApi.getMarketForecast()
-        .then((data) => setMarketForecast(data))
-        .catch(() => setMarketForecast(null))
-        .finally(() => setForecastLoading(false))
-    }
-  }, [currentQuestion?.id, marketForecast, forecastLoading])
+    if (currentQuestion?.id !== 'market_analysis') return
+    if (btcAnalysis !== null || btcAnalysisLoading) return
+
+    setBtcAnalysisLoading(true)
+    versionApi.getFull()
+      .then(({ api_key_configured }) => {
+        if (!api_key_configured) {
+          setApiKeyConfigured(false)
+          setBtcAnalysisLoading(false)
+          return
+        }
+        setApiKeyConfigured(true)
+        return chatApi.getBtcAnalysis()
+      })
+      .then((data) => {
+        if (data !== undefined) setBtcAnalysis(data)
+      })
+      .catch(() => {
+        setBtcAnalysis(null)
+      })
+      .finally(() => setBtcAnalysisLoading(false))
+  }, [currentQuestion?.id, btcAnalysis, btcAnalysisLoading])
 
   const handleAnswer = (value: any) => {
     setAnswers((prev) => {
-      const isBeginnerPrev = prev.experience_level === 'beginner'
+      const prevLimits = getLimits(prev.experience_level ?? 'beginner')
       let val = value
-      if (currentQuestion?.id === 'investment_horizon' && isBeginnerPrev && value > 3) val = 3
-      if (currentQuestion?.id === 'investment_amount' && isBeginnerPrev && value > 5000) val = 5000
-      if (currentQuestion?.id === 'max_drawdown' && isBeginnerPrev && value > 10) val = 10
+      if (currentQuestion?.id === 'investment_horizon' && value > prevLimits.maxHorizon) val = prevLimits.maxHorizon
+      if (currentQuestion?.id === 'investment_amount' && value > prevLimits.maxAmount) val = prevLimits.maxAmount
+      if (currentQuestion?.id === 'dca_parts') {
+        val = Math.min(Math.max(value, prevLimits.dcaPartsMin), prevLimits.dcaPartsMax)
+      }
+      if (currentQuestion?.id === 'max_drawdown' && prevLimits.maxDrawdown != null && value > prevLimits.maxDrawdown) val = prevLimits.maxDrawdown
       const next = { ...prev, [currentQuestion.id]: val }
-      if (currentQuestion?.id === 'experience_level' && val === 'beginner') {
-        next.needs_liquidity = true
-        next.use_dca = true
-        next.dca_parts = 3
-        if (prev.investment_horizon != null && prev.investment_horizon > 3) next.investment_horizon = 3
-        if (prev.investment_amount != null && prev.investment_amount > 5000) next.investment_amount = 5000
-        if (prev.max_drawdown != null && prev.max_drawdown > 10) next.max_drawdown = 10
+      if (currentQuestion?.id === 'experience_level') {
+        const newLimits = getLimits(val)
+        if (val === 'beginner') {
+          next.needs_liquidity = true
+          next.use_dca = true
+          next.dca_parts = 3
+        }
+        if (val === 'some') {
+          next.use_dca = true
+          next.dca_parts = 4
+          next.needs_liquidity = true
+        }
+        if (newLimits.maxDrawdown != null && prev.max_drawdown != null && prev.max_drawdown > newLimits.maxDrawdown) {
+          next.max_drawdown = newLimits.maxDrawdown
+        }
+        if (prev.investment_horizon != null && prev.investment_horizon > newLimits.maxHorizon) next.investment_horizon = newLimits.maxHorizon
+        if (prev.investment_amount != null && prev.investment_amount > newLimits.maxAmount) next.investment_amount = newLimits.maxAmount
+        if (prev.dca_parts != null) {
+          next.dca_parts = Math.min(Math.max(prev.dca_parts, newLimits.dcaPartsMin), newLimits.dcaPartsMax)
+        }
       }
       return next
     })
@@ -535,16 +548,18 @@ export default function QuestionnairePage() {
     clearError()
     
     try {
+      const submitLimits = getLimits(answers.experience_level ?? 'beginner')
       const isBeginnerSubmit = answers.experience_level === 'beginner'
+      const isSomeSubmit = answers.experience_level === 'some'
       await createProfile({
         name: answers.name.trim(),
-        investment_horizon: isBeginnerSubmit ? Math.min(answers.investment_horizon ?? 3, 3) : answers.investment_horizon,
-        investment_amount: isBeginnerSubmit ? Math.min(answers.investment_amount ?? 5000, 5000) : answers.investment_amount,
-        max_drawdown: isBeginnerSubmit ? Math.min(answers.max_drawdown ?? 10, 10) : answers.max_drawdown,
-        needs_liquidity: isBeginnerSubmit ? true : answers.needs_liquidity,
+        investment_horizon: Math.min(answers.investment_horizon ?? 3, submitLimits.maxHorizon),
+        investment_amount: Math.min(answers.investment_amount ?? 10000, submitLimits.maxAmount),
+        max_drawdown: submitLimits.maxDrawdown != null ? Math.min(answers.max_drawdown ?? 30, submitLimits.maxDrawdown) : answers.max_drawdown,
+        needs_liquidity: isBeginnerSubmit || isSomeSubmit ? true : answers.needs_liquidity,
         experience_level: answers.experience_level,
-        use_dca: isBeginnerSubmit ? true : answers.use_dca,
-        dca_parts: isBeginnerSubmit ? 3 : (answers.use_dca ? answers.dca_parts : null),
+        use_dca: isBeginnerSubmit || isSomeSubmit ? true : answers.use_dca,
+        dca_parts: isBeginnerSubmit ? 3 : isSomeSubmit ? 4 : (answers.use_dca ? Math.min(Math.max(answers.dca_parts ?? 4, submitLimits.dcaPartsMin), submitLimits.dcaPartsMax) : null),
         use_default_portfolio: answers.use_default_portfolio,
       })
       
@@ -559,6 +574,7 @@ export default function QuestionnairePage() {
           initial_amount: firstPartAmount,
           target_years: answers.investment_horizon,
           experience_level: answers.experience_level,
+          needs_liquidity: (answers.experience_level === 'medium' || answers.experience_level === 'advanced') ? answers.needs_liquidity : undefined,
         })
         router.push('/dashboard')
       } else {
@@ -635,140 +651,20 @@ export default function QuestionnairePage() {
               </p>
             )}
             
-            {/* Окно анализа крипторынка (шаг после портфеля) */}
+            {/* Окно анализа Биткойна (шаг после портфеля) */}
             {isMarketAnalysisStep && (
               <div className="my-6 space-y-4">
-                {forecastLoading ? (
+                {apiKeyConfigured === false ? (
+                  <ApiKeyBanner variant="dashboard" className="my-4" />
+                ) : btcAnalysisLoading ? (
                   <div className="flex flex-col items-center justify-center py-12">
                     <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-primary-600"></div>
-                    <p className="mt-3 text-gray-600">Анализ рынка криптоконсультантом...</p>
+                    <p className="mt-3 text-gray-600 font-medium">Это многофакторный анализ, который длится несколько минут, подождите.</p>
+                    <p className="mt-1 text-sm text-gray-500">Анализ Биткойна по плану Crypto Market Report...</p>
                   </div>
-                ) : marketForecast ? (
+                ) : btcAnalysis && !btcAnalysis.error ? (
                   <div className="space-y-4">
-                    <div className="p-4 rounded-lg border-2 border-green-200 bg-green-50">
-                      <div className="flex items-center gap-2 mb-2">
-                        <TrendingUp className="w-5 h-5 text-green-600" />
-                        <span className="font-semibold text-green-800">Позитивный сценарий</span>
-                        <span className="ml-auto text-sm font-medium text-green-700 bg-green-200 px-2 py-0.5 rounded">
-                          {marketForecast.positive.probability}%
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-700">{marketForecast.positive.description}</p>
-                    </div>
-                    <div className="p-4 rounded-lg border-2 border-red-200 bg-red-50">
-                      <div className="flex items-center gap-2 mb-2">
-                        <TrendingDown className="w-5 h-5 text-red-600" />
-                        <span className="font-semibold text-red-800">Негативный сценарий</span>
-                        <span className="ml-auto text-sm font-medium text-red-700 bg-red-200 px-2 py-0.5 rounded">
-                          {marketForecast.negative.probability}%
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-700">{marketForecast.negative.description}</p>
-                    </div>
-                    <div className="p-4 rounded-lg border-2 border-gray-200 bg-gray-50">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Minus className="w-5 h-5 text-gray-600" />
-                        <span className="font-semibold text-gray-800">Базовый сценарий</span>
-                        <span className="ml-auto text-sm font-medium text-gray-700 bg-gray-200 px-2 py-0.5 rounded">
-                          {marketForecast.base.probability}%
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-700">{marketForecast.base.description}</p>
-                    </div>
-                    {/* Этап 2: Прогноз портфеля на 6 месяцев */}
-                    {marketForecast.portfolio_outlook && (
-                      <div className="p-4 rounded-lg border-2 border-primary-200 bg-primary-50">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Wallet className="w-5 h-5 text-primary-600" />
-                          <span className="font-semibold text-primary-800">
-                            Ваш портфель через 6 месяцев
-                          </span>
-                          <span className="ml-auto text-xs text-primary-600">
-                            при{' '}
-                            {marketForecast.portfolio_outlook.most_likely_scenario === 'positive'
-                              ? 'позитивном'
-                              : marketForecast.portfolio_outlook.most_likely_scenario === 'negative'
-                                ? 'негативном'
-                                : 'базовом'}{' '}
-                            сценарии
-                          </span>
-                        </div>
-                        <p className="text-sm text-gray-700 whitespace-pre-line">
-                          {marketForecast.portfolio_outlook.description}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* График прогноза крипторынка (от сегодня на 6 месяцев) */}
-                    <div className="mt-6 pt-4 border-t border-gray-200">
-                      <div className="h-56 w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <LineChart
-                            data={generateForecastChartData(
-                              marketForecast.portfolio_outlook?.most_likely_scenario ?? 'base'
-                            )}
-                            margin={{ top: 5, right: 5, left: 0, bottom: 5 }}
-                          >
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                            <XAxis
-                              dataKey="month"
-                              tick={{ fontSize: 10 }}
-                              stroke="#6b7280"
-                              interval={4}
-                            />
-                            <YAxis
-                              domain={[55, 165]}
-                              tick={{ fontSize: 11 }}
-                              stroke="#6b7280"
-                              tickFormatter={(v) => `${v}%`}
-                            />
-                            <Tooltip
-                              formatter={(value: number) => [`${value.toFixed(1)}%`, '']}
-                              labelFormatter={(label) => `Месяц: ${label}`}
-                            />
-                            <Legend
-                              wrapperStyle={{ fontSize: 12 }}
-                              formatter={(value) =>
-                                value === 'mostProbable'
-                                  ? 'Наиболее вероятный'
-                                  : value === 'positive'
-                                    ? 'Позитивный рост'
-                                    : value === 'negative'
-                                      ? 'Негативный рост'
-                                      : value
-                              }
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="mostProbable"
-                              stroke="#1f2937"
-                              strokeWidth={2.5}
-                              dot={false}
-                              name="mostProbable"
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="positive"
-                              stroke="#16a34a"
-                              strokeWidth={2}
-                              dot={false}
-                              name="positive"
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="negative"
-                              stroke="#dc2626"
-                              strokeWidth={2}
-                              dot={false}
-                              name="negative"
-                            />
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                      <p className="mt-3 text-xs text-gray-500 text-center">
-                        Прогноз ИИ — могут быть расхождения с реальной ситуацией.
-                      </p>
-                    </div>
+                    <BtcAnalysisContent data={btcAnalysis} />
 
                     {/* Стоимость портфеля по графику инвестирования */}
                     <div className="mt-6 pt-6 border-t border-gray-200">
@@ -782,9 +678,9 @@ export default function QuestionnairePage() {
                         Первый вход выполнен сегодня. Ниже — нарастающая стоимость портфеля после каждого последующего входа.
                       </p>
                       {(() => {
-                        const parts = answers.use_dca
-                          ? (isBeginner ? 3 : (answers.dca_parts ?? 4))
-                          : 1
+        const parts = answers.use_dca
+          ? (isBeginner ? 3 : isSomeLevel ? 4 : (answers.dca_parts ?? 4))
+          : 1
                         const amount = answers.investment_amount ?? 10000
                         const entries = getDcaEntriesWithCumulative(parts, amount, new Date()) // без asOfDate — только 1-й вход выполнен
                         return (
@@ -880,7 +776,7 @@ export default function QuestionnairePage() {
                     </div>
                   </div>
                 ) : (
-                  <p className="text-gray-500 text-sm py-4">Не удалось загрузить прогноз. Продолжайте.</p>
+                  <p className="text-gray-500 text-sm py-4">Не удалось загрузить анализ Биткойна. Продолжайте.</p>
                 )}
               </div>
             )}
@@ -900,27 +796,33 @@ export default function QuestionnairePage() {
                 />
               )}
               
-              {currentQuestion?.type === 'slider' && !(currentQuestion?.id === 'dca_parts' && isBeginner) && (
+              {currentQuestion?.type === 'slider' && !(currentQuestion?.id === 'dca_parts' && (isBeginner || isSomeLevel)) && (
                 <Slider
                   value={
-                    currentQuestion?.id === 'investment_horizon' && isBeginner
-                      ? Math.min(answers[currentQuestion.id] ?? currentQuestion.default, 3)
-                      : currentQuestion?.id === 'investment_amount' && isBeginner
-                        ? Math.min(answers[currentQuestion.id] ?? currentQuestion.default, 5000)
-                        : currentQuestion?.id === 'max_drawdown' && isBeginner
-                          ? Math.min(answers[currentQuestion.id] ?? currentQuestion.default, 10)
-                          : answers[currentQuestion.id] ?? currentQuestion.default
+                    currentQuestion?.id === 'investment_horizon'
+                      ? Math.min(answers[currentQuestion.id] ?? currentQuestion.default, limits.maxHorizon)
+                      : currentQuestion?.id === 'investment_amount'
+                        ? Math.min(answers[currentQuestion.id] ?? currentQuestion.default, limits.maxAmount)
+                        : currentQuestion?.id === 'max_drawdown' && limits.maxDrawdown != null
+                          ? Math.min(answers[currentQuestion.id] ?? currentQuestion.default, limits.maxDrawdown)
+                          : currentQuestion?.id === 'dca_parts'
+                            ? Math.min(Math.max(answers[currentQuestion.id] ?? currentQuestion.default, limits.dcaPartsMin), limits.dcaPartsMax)
+                            : answers[currentQuestion.id] ?? currentQuestion.default
                   }
                   onChange={handleAnswer}
-                  min={currentQuestion.min!}
+                  min={
+                    currentQuestion?.id === 'dca_parts' ? limits.dcaPartsMin : currentQuestion.min!
+                  }
                   max={
-                    currentQuestion?.id === 'investment_horizon' && isBeginner
-                      ? 3
-                      : currentQuestion?.id === 'investment_amount' && isBeginner
-                        ? 5000
-                        : currentQuestion?.id === 'max_drawdown' && isBeginner
-                          ? 10
-                          : currentQuestion.max!
+                    currentQuestion?.id === 'investment_horizon'
+                      ? limits.maxHorizon
+                      : currentQuestion?.id === 'investment_amount'
+                        ? limits.maxAmount
+                        : currentQuestion?.id === 'max_drawdown' && limits.maxDrawdown != null
+                          ? limits.maxDrawdown
+                          : currentQuestion?.id === 'dca_parts'
+                            ? limits.dcaPartsMax
+                            : currentQuestion.max!
                   }
                   valueSuffix={currentQuestion.suffix}
                 />
@@ -928,6 +830,11 @@ export default function QuestionnairePage() {
               {currentQuestion?.type === 'slider' && currentQuestion?.id === 'dca_parts' && isBeginner && (
                 <p className="text-lg text-gray-700 py-2">
                   3 части (рекомендация для новичков)
+                </p>
+              )}
+              {currentQuestion?.type === 'slider' && currentQuestion?.id === 'dca_parts' && isSomeLevel && (
+                <p className="text-lg text-gray-700 py-2">
+                  4 части — сумма делится на 4 части при входе в рынок (фиксировано для вашего уровня)
                 </p>
               )}
               
@@ -938,23 +845,32 @@ export default function QuestionnairePage() {
                     value={answers[currentQuestion.id] ?? currentQuestion.default}
                     onChange={(e) => handleAnswer(Number(e.target.value))}
                     min={currentQuestion.min}
-                    max={isBeginner ? 5000 : currentQuestion.max}
+                    max={limits.maxAmount}
                   />
                   <Slider
-                    value={Math.min(answers[currentQuestion.id] ?? currentQuestion.default, isBeginner ? 5000 : currentQuestion.max!)}
+                    value={Math.min(answers[currentQuestion.id] ?? currentQuestion.default, limits.maxAmount)}
                     onChange={handleAnswer}
                     min={currentQuestion.min!}
-                    max={isBeginner ? 5000 : currentQuestion.max!}
+                    max={limits.maxAmount}
                     valuePrefix="$"
                     showValue={false}
                   />
                   <p className="text-center text-lg font-semibold text-primary-600">
-                    ${(Math.min(answers[currentQuestion.id] ?? currentQuestion.default, isBeginner ? 5000 : currentQuestion.max!)).toLocaleString()}
+                    ${(Math.min(answers[currentQuestion.id] ?? currentQuestion.default, limits.maxAmount)).toLocaleString()}
                   </p>
                 </div>
               )}
               
-              {(currentQuestion?.type === 'boolean' || currentQuestion?.type === 'select') && (
+              {currentQuestion?.id === 'needs_liquidity' && isSomeLevel ? (
+                <div className="p-4 rounded-lg border-2 border-primary-200 bg-primary-50">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-5 h-5 text-primary-600 shrink-0" />
+                    <span className="text-gray-800 font-medium">
+                      Хочу возможность частичного вывода — рекомендация для вашего уровня опыта
+                    </span>
+                  </div>
+                </div>
+              ) : (currentQuestion?.type === 'boolean' || currentQuestion?.type === 'select') && (
                 <div className="space-y-3">
                   {currentQuestion.options?.map((option) => (
                     <button
@@ -1001,11 +917,18 @@ export default function QuestionnairePage() {
                           ? getDcaComment(answers.use_dca ?? currentQuestion.default)
                           : currentQuestion?.id === 'dca_parts'
                             ? getDcaPartsComment(
-                                isBeginner ? 3 : (answers.dca_parts ?? currentQuestion.default),
+                                isBeginner ? 3 : isSomeLevel ? 4 : (answers.dca_parts ?? currentQuestion.default),
                                 new Date(),
-                                isBeginner ? (answers.investment_amount ?? 0) : undefined
+                                (isBeginner || isSomeLevel) ? (answers.investment_amount ?? 0) : undefined
                               )
-                            : currentQuestion?.comment}
+                            : currentQuestion?.id === 'use_default_portfolio'
+                              ? getPortfolioComment(
+                                  answers.experience_level ?? 'beginner',
+                                  (answers.experience_level === 'medium' || answers.experience_level === 'advanced')
+                                    ? answers.needs_liquidity
+                                    : undefined
+                                )
+                              : currentQuestion?.comment}
             </div>
             </>
             )}

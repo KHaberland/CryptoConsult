@@ -11,6 +11,29 @@
 - Получать рекомендации по стратегии и управлению рисками
 - Контролировать просадку и получать алерты
 
+## Версия
+
+Версия приложения хранится в `version.py` (переменная `__version__`). Она используется:
+- в интерфейсе (шапка, футер, title)
+- в логах при старте backend
+- в сборке frontend (скрипт `prebuild` синхронизирует версию в `package.json` и `src/version.ts`)
+- в API: `GET /api/version/`
+
+Для установщика: `python -c "from version import __version__; print(__version__)"`
+
+### Установщик (Inno Setup)
+
+Скрипт установщика: `installer/CryptoConsult.iss`. Секция Uninstall удаляет кэш и временные файлы при деинсталляции.
+
+Сборка установщика (требуется [Inno Setup 6](https://jrsoftware.org/isdl.php)):
+
+```powershell
+cd installer
+.\build-installer.ps1
+```
+
+Результат: `dist/installer/CryptoConsult-Setup-1.0.0.exe`
+
 ## Архитектура
 
 ```
@@ -119,6 +142,9 @@ Frontend доступен на: http://localhost:3000
 
 ## API
 
+### Версия
+- `GET /api/version/` — версия приложения
+
 ### Аутентификация
 - `POST /api/auth/register/` — регистрация
 - `POST /api/auth/login/` — вход
@@ -143,6 +169,20 @@ Frontend доступен на: http://localhost:3000
 - `GET /api/chat/history/` — история
 - `GET /api/chat/risk/` — анализ рисков
 - `GET /api/chat/alert/` — проверка алерта
+
+## Тесты
+
+```powershell
+cd backend
+python manage.py test users.tests portfolios.tests -v 2
+```
+
+Тесты проверяют:
+- Создание и валидацию профиля (анкета)
+- Ограничения по уровню опыта (новичок, средний, продвинутый)
+- Создание портфеля после анкеты
+- Поиск профиля по имени (логин)
+- Полный сценарий: профиль → портфель
 
 ## Технологии
 

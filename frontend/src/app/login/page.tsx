@@ -7,6 +7,7 @@ import { Alert } from '@/components/ui/Alert'
 import { profileApi } from '@/services/api'
 import { useSessionStore } from '@/store/sessionStore'
 import { TrendingUp, User, Loader2 } from 'lucide-react'
+import { APP_VERSION } from '@/version'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -43,6 +44,12 @@ export default function LoginPage() {
         // Начинаем новую сессию с новым session_id
         startNewUserSession(name.trim())
         router.push('/onboarding/welcome')
+      } else if (!err.response) {
+        // Сеть недоступна — backend не запущен или не отвечает
+        setError(
+          'Сервер не отвечает. Подождите 1–2 минуты после первого запуска (установка зависимостей). ' +
+          'При повторных запусках — 15–20 секунд. Затем обновите страницу.'
+        )
       } else {
         setError('Ошибка при проверке. Попробуйте ещё раз.')
       }
@@ -119,7 +126,7 @@ export default function LoginPage() {
         </div>
         
         <p className="text-center text-xs text-gray-500 mt-6">
-          MVP версия без регистрации
+          v{APP_VERSION} • без регистрации
         </p>
       </div>
     </div>
