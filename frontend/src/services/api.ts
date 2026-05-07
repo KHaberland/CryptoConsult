@@ -94,6 +94,7 @@ export const profileApi = {
     use_dca: boolean
     dca_parts?: number
     use_default_portfolio: boolean
+    has_existing_portfolio?: boolean
   }) => {
     const response = await api.post('/profile/', data)
     return response.data
@@ -108,6 +109,7 @@ export const profileApi = {
     use_dca: boolean
     dca_parts: number
     use_default_portfolio: boolean
+    has_existing_portfolio: boolean
   }>) => {
     const response = await api.patch('/profile/', data)
     return response.data
@@ -165,14 +167,301 @@ export const portfolioApi = {
     return response.data
   },
 
+  contributeByUnits: async (
+    items: Array<{
+      symbol: string
+      units: number
+      purchase_price?: number
+      purchased_at?: string
+    }>,
+    options?: { wallet_id?: number | null }
+  ) => {
+    const payload: Record<string, unknown> = { items }
+    if (options?.wallet_id != null) {
+      payload.wallet_id = options.wallet_id
+    }
+    const response = await api.post('/portfolio/contribute/', payload)
+    return response.data
+  },
+
+  getSwapQuote: async (
+    params: {
+      from_symbol: string
+      to_symbol: string
+      from_units: number
+    },
+    options?: { wallet_id?: number | null }
+  ) => {
+    const query: Record<string, unknown> = { ...params }
+    if (options?.wallet_id != null) {
+      query.wallet_id = options.wallet_id
+    }
+    const response = await api.get('/portfolio/swap/quote/', { params: query })
+    return response.data as {
+      from_symbol: string
+      from_units: number
+      from_price: number
+      to_symbol: string
+      to_units_expected: number
+      to_price: number
+      value_usd: number
+      units_available?: number
+      wallet_id?: number
+      wallet_name?: string
+    }
+  },
+
+  executeSwap: async (
+    data: {
+      from_symbol: string
+      from_units: number
+      to_symbol: string
+      to_units: number
+      note?: string
+    },
+    options?: { wallet_id?: number | null }
+  ) => {
+    const payload: Record<string, unknown> = { ...data }
+    if (options?.wallet_id != null) {
+      payload.wallet_id = options.wallet_id
+    }
+    const response = await api.post('/portfolio/swap/', payload)
+    return response.data
+  },
+
+  getTradableAssets: async () => {
+    const response = await api.get('/portfolio/tradable-assets/')
+    return response.data as {
+      assets: Array<{
+        symbol: string
+        name: string
+        current_price: number
+        is_recommended: boolean
+        in_portfolio: boolean
+        is_stable: boolean
+      }>
+      count: number
+    }
+  },
+
   getWithdrawProposal: async (amount: number) => {
     const response = await api.get('/portfolio/withdraw/proposal/', { params: { amount } })
     return response.data
   },
 
-  withdraw: async (assets: Array<{ symbol: string; units_to_sell: number }>) => {
-    const response = await api.post('/portfolio/withdraw/', { assets })
+  withdraw: async (
+    assets: Array<{
+      symbol: string
+      units_to_sell: number
+      wallet_id?: number | null
+    }>
+  ) => {
+    // Бэкенд принимает wallet_id per item; null/undefined → backend сам
+    // выберет кошелёк (по стратегии max-units, см. PLAN06 — Агент 13).
+    const payload = {
+      assets: assets.map(({ symbol, units_to_sell, wallet_id }) => {
+        const item: Record<string, unknown> = { symbol, units_to_sell }
+        if (wallet_id != null) item.wallet_id = wallet_id
+        return item
+      }),
+    }
+    const response = await api.post('/portfolio/withdraw/', payload)
     return response.data
+  },
+
+  getTop10: async () => {
+    const response = await api.get('/portfolio/top10/')
+    return response.data as {
+      top10: Array<{
+        symbol: string
+        name: string
+        current_price: number
+        market_cap: number
+      }>
+      count: number
+    }
+  },
+
+  import: async (data: {
+    name?: string
+    target_years: number
+    assets: Array<{
+      symbol: string
+      name?: string
+      units?: number
+      value_usd?: number
+      purchase_price?: number
+      purchased_at?: string
+    }>
+  }) => {
+    const response = await api.post('/portfolio/import/', data)
+    return response.data as {
+      success: boolean
+      portfolio: {
+        id: number
+        name: string
+        initial_amount: number | string
+        target_years: number
+        is_imported: boolean
+        assets: Array<{
+          id: number
+          symbol: string
+          name: string
+          percentage: number | string
+          initial_price: number | string | null
+          units: number | string | null
+          is_recommended: boolean
+          purchased_at: string | null
+        }>
+      }
+      non_recommended: Array<{ symbol: string; name: string; message: string }>
+      warnings: Array<{ symbol: string; message: string }>
+      summary: {
+        total_initial: number
+        total_current: number
+        profit_loss: number
+        profit_loss_percent: number
+      }
+    }
+  },
+}
+
+// ============ Wallets API ============
+
+export type WalletType = 'exchange' | 'hot' | 'cold' | 'bank' | 'other'
+
+export interface WalletHolding {
+  id: number
+  wallet_id: number
+  symbol: string
+  units: number | string
+  /** USD-стоимость holding'а на момент запроса; null, если цена недоступна. */
+  value_usd?: number | string | null
+  updated_at?: string
+}
+
+export interface Wallet {
+  id: number
+  portfolio_id: number
+  name: string
+  type: WalletType
+  is_default: boolean
+  note?: string | null
+  created_at?: string
+  updated_at?: string
+  holdings?: WalletHolding[]
+  /** Сумма value_usd по holdings; 0, если ни одной цены не получено. */
+  total_value_usd?: number | string | null
+}
+
+export interface WalletTransfer {
+  id: number
+  portfolio_id?: number
+  from_wallet_id: number
+  from_wallet_name?: string
+  to_wallet_id: number
+  to_wallet_name?: string
+  symbol: string
+  from_units: number | string
+  to_units: number | string
+  fee_units: number | string
+  fee_usd: number | string
+  occurred_on: string
+  note?: string
+  created_at?: string
+}
+
+export interface WalletCreateInput {
+  name: string
+  type: WalletType
+  note?: string
+  is_default?: boolean
+}
+
+export type WalletUpdateInput = Partial<WalletCreateInput>
+
+export interface WalletTransferInput {
+  from_wallet_id: number
+  to_wallet_id: number
+  symbol: string
+  from_units: number | string
+  to_units: number | string
+  note?: string
+}
+
+export interface HoldingAdjustInput {
+  units_after: number | string
+  reason?:
+    | 'network_fee'
+    | 'exchange_fee'
+    | 'reconciliation'
+    | 'input_error'
+    | 'other'
+  note?: string
+  occurred_on?: string
+}
+
+export const walletApi = {
+  list: async (): Promise<Wallet[]> => {
+    const response = await api.get<Wallet[]>('/portfolio/wallets/')
+    return response.data
+  },
+
+  create: async (data: WalletCreateInput): Promise<Wallet> => {
+    const response = await api.post<Wallet>('/portfolio/wallets/', data)
+    return response.data
+  },
+
+  update: async (
+    id: number,
+    data: WalletUpdateInput
+  ): Promise<Wallet> => {
+    const response = await api.patch<Wallet>(
+      `/portfolio/wallets/${id}/`,
+      data
+    )
+    return response.data
+  },
+
+  delete: async (id: number): Promise<{ success: boolean } | void> => {
+    const response = await api.delete(`/portfolio/wallets/${id}/`)
+    return response.data
+  },
+
+  transfer: async (data: WalletTransferInput) => {
+    const response = await api.post('/portfolio/wallets/transfer/', data)
+    return response.data as {
+      success: boolean
+      message: string
+      transfer: WalletTransfer
+    }
+  },
+
+  adjustHolding: async (
+    walletId: number,
+    symbol: string,
+    data: HoldingAdjustInput
+  ) => {
+    const response = await api.post(
+      `/portfolio/wallets/${walletId}/holdings/${symbol}/adjust/`,
+      data
+    )
+    return response.data as {
+      success: boolean
+      message?: string
+      adjustment: {
+        id: number
+        wallet_id: number
+        symbol: string
+        units_before: number | string
+        units_after: number | string
+        delta: number | string
+        value_delta_usd: number | string
+        reason: string
+        note?: string
+        occurred_on: string
+      }
+    }
   },
 }
 

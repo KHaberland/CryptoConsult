@@ -25,15 +25,15 @@ def root_view(request):
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Крипто-Консультант API</title>
         <style>
-            * { box-sizing: border-box; }
-            body { font-family: system-ui, sans-serif; margin: 0; padding: 2rem; background: #f8fafc; color: #1e293b; }
-            .container { max-width: 600px; margin: 0 auto; }
-            h1 { color: #0284c7; margin-bottom: 1rem; }
-            .btn { display: inline-block; padding: 0.75rem 1.5rem; background: #0284c7; color: white; text-decoration: none; border-radius: 8px; font-weight: 500; margin: 1rem 0; }
-            .btn:hover { background: #0369a1; }
-            ul { list-style: none; padding: 0; }
-            li { margin: 0.5rem 0; }
-            a { color: #0284c7; }
+            * {{ box-sizing: border-box; }}
+            body {{ font-family: system-ui, sans-serif; margin: 0; padding: 2rem; background: #f8fafc; color: #1e293b; }}
+            .container {{ max-width: 600px; margin: 0 auto; }}
+            h1 {{ color: #0284c7; margin-bottom: 1rem; }}
+            .btn {{ display: inline-block; padding: 0.75rem 1.5rem; background: #0284c7; color: white; text-decoration: none; border-radius: 8px; font-weight: 500; margin: 1rem 0; }}
+            .btn:hover {{ background: #0369a1; }}
+            ul {{ list-style: none; padding: 0; }}
+            li {{ margin: 0.5rem 0; }}
+            a {{ color: #0284c7; }}
         </style>
     </head>
     <body>

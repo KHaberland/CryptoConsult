@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Optional, Dict, List
 
 from django.conf import settings
+from django.db import transaction
 from openai import OpenAI
 
 from portfolios.models import Portfolio
@@ -95,6 +96,36 @@ class PortfolioAnalyzer:
         _, scale = self._get_dca_corrected_invested()
         return scale
 
+    def finalize_dca_scale(self) -> float:
+        """
+        «Затвердить» активную DCA-коррекцию: пересчитать units каждого актива
+        и `Portfolio.initial_amount` так, чтобы дальнейшие операции работали
+        в системе координат с `units_scale == 1.0`.
+
+        Текущая отображаемая стоимость портфеля при этом не меняется
+        (units * price = (units * scale) * price).
+
+        Returns:
+            Применённый scale. Если коррекция не была активна, возвращает 1.0
+            и ничего не меняет.
+        """
+        scale = self.get_units_scale()
+        if scale >= 1.0 - 1e-9:
+            return 1.0
+
+        with transaction.atomic():
+            for asset in self.portfolio.assets.all():
+                units = float(asset.units or 0)
+                if units > 0:
+                    asset.units = round(units * scale, 8)
+                    asset.save(update_fields=['units'])
+
+            new_initial = float(self.portfolio.initial_amount or 0) * scale
+            self.portfolio.initial_amount = round(new_initial, 2)
+            self.portfolio.save(update_fields=['initial_amount'])
+
+        return scale
+
     def get_current_value(self) -> Dict:
         """Рассчитать текущую стоимость портфеля с учётом всех взносов."""
         assets = self.portfolio.assets.all()
@@ -138,12 +169,14 @@ class PortfolioAnalyzer:
                 'symbol': asset.symbol,
                 'name': asset.name,
                 'percentage': float(asset.percentage),
+                'units': units,
                 'initial_value': asset_initial_value,
                 'current_value': asset_current_value,
                 'current_price': current_price,
                 'change_24h': change_24h,
                 'profit_loss': profit_loss,
                 'profit_loss_percent': profit_loss_percent,
+                'is_recommended': bool(getattr(asset, 'is_recommended', True)),
             })
         
         profit_loss = total_value - total_invested
@@ -375,11 +408,19 @@ class AIAdvisorService:
             if contributions_count > 0:
                 contributions_note = f"\n• Взносов внесено: {contributions_count} (портфель растёт по мере DCA)"
             
+            is_imported = bool(getattr(portfolio, 'is_imported', False))
+            portfolio_kind = (
+                "Импортированный (пользователь ввёл уже существующие позиции)"
+                if is_imported
+                else "Создан с нуля по методике сервиса"
+            )
+
             prompt += f"""
 ═══════════════════════════════════════
 ТЕКУЩИЙ ПОРТФЕЛЬ (АКТУАЛЬНЫЕ ДАННЫЕ):
 ═══════════════════════════════════════
 • Название: {portfolio.name}
+• Тип портфеля: {portfolio_kind}
 • Дата начала: {portfolio.start_date}
 • Целевой горизонт: {portfolio.target_years} лет
 • Целевая дата: {time_data['target_date']}
@@ -396,7 +437,90 @@ class AIAdvisorService:
 📊 СОСТАВ ПОРТФЕЛЯ:
 {assets_str}
 """
-            
+
+            # Особые правила для импортированного портфеля
+            if is_imported:
+                all_non_rec_assets = [
+                    a for a in value_data['assets']
+                    if a.get('is_recommended') is False
+                ]
+                # USDC трактуем как стратегический кэш (ликвидный резерв),
+                # а не как «альткойн вне ТОП-10».
+                usdc_assets = [
+                    a for a in all_non_rec_assets if a.get('symbol') == 'USDC'
+                ]
+                non_rec_assets = [
+                    a for a in all_non_rec_assets if a.get('symbol') != 'USDC'
+                ]
+                non_rec_str = (
+                    ", ".join(
+                        f"{a['symbol']} ({a['percentage']}%)"
+                        for a in non_rec_assets
+                    )
+                    if non_rec_assets
+                    else "нет"
+                )
+                prompt += f"""
+═══════════════════════════════════════
+⚠️ ВАЖНО: ИМПОРТИРОВАННЫЙ ПОРТФЕЛЬ
+═══════════════════════════════════════
+Пользователь уже владеет указанными активами (купил их ранее на бирже
+или холодном кошельке). Это НЕ свежесозданный портфель по методике сервиса.
+
+ПРАВИЛА ДЛЯ ТАКОГО ПОРТФЕЛЯ:
+1. НЕ предлагай полностью пересоздавать портфель «с нуля» —
+   это повлечёт лишние комиссии и налоги.
+2. НЕ предлагай DCA-стратегию для уже купленных позиций
+   (DCA относится только к будущим докупкам).
+3. Анализируй ТЕКУЩИЙ состав и давай рекомендации
+   по ПОСТЕПЕННОЙ ребалансировке (а не одномоментной).
+4. Особое внимание удели позициям ВНЕ ТОП-10 ликвидных монет
+   (они помечены `is_recommended=False`), ЗА ИСКЛЮЧЕНИЕМ стейблкоина
+   USDC — он трактуется как стратегический ликвидный резерв (см. ниже).
+
+Активы вне ТОП-10 ликвидных в этом портфеле (без учёта USDC): {non_rec_str}.
+"""
+                if usdc_assets:
+                    usdc_str = ", ".join(
+                        f"{a['percentage']}%" for a in usdc_assets
+                    )
+                    prompt += f"""
+───────────────────────────────────────
+💵 USDC — СТРАТЕГИЧЕСКИЙ КЭШ
+───────────────────────────────────────
+В портфеле присутствует доля стейблкоина USDC ({usdc_str}).
+USDC выполняет функцию ликвидного резерва и инструмента управления риском,
+поэтому НЕ считай его «альткойном вне ТОП-10» и НЕ предлагай его обменивать
+на BTC/ETH «на ту же сумму».
+
+ПРАВИЛА ПО USDC:
+1. Допустимая доля USDC в портфеле: 5–15%. Если доля попадает в этот
+   диапазон — это нормальная практика управления рисками в условиях
+   рыночной волатильности, специально комментировать это не нужно.
+2. Если доля USDC меньше 5% — можно мягко упомянуть, что небольшой
+   ликвидный резерв полезен для докупок на коррекциях.
+3. Если доля USDC больше 15% — можно мягко обратить внимание, что
+   избыточный кэш снижает потенциальную доходность портфеля, и при
+   подходящих рыночных условиях часть USDC можно перевести в
+   инвестиционные активы (BTC/ETH/другие монеты ТОП-10).
+4. Назначение USDC в портфеле:
+   • докупка активов на коррекциях рынка;
+   • ребалансировка портфеля;
+   • обеспечение ликвидности.
+5. Конвертация USDC в инвестиционные активы должна происходить
+   ПО СИГНАЛАМ РЫНКА и стратегии распределения капитала,
+   а не как «обязательная замена альткойна».
+"""
+                if non_rec_assets:
+                    prompt += (
+                        "Для каждого актива из списка «вне ТОП-10 (без учёта USDC)» "
+                        "при подходящем запросе пользователя рекомендуй обмен на "
+                        "актив из ТОП-10 (BTC, ETH или другую крупную монету), "
+                        "объясняй риск низкой ликвидности и непригодности "
+                        "альткойнов для долгосрочного холда. НО не настаивай — "
+                        "решение остаётся за пользователем.\n"
+                    )
+
             # Проверяем, можно ли рекомендовать выход
             if time_data['can_consider_exit'] and value_data['profit_loss_percent'] > 20:
                 prompt += f"""

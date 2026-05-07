@@ -1,12 +1,12 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Modal, ModalFooter } from '@/components/ui/Modal'
 import { Button } from '@/components/ui/Button'
 import { Alert } from '@/components/ui/Alert'
 import { CheckCircle, DollarSign, ArrowRight, ArrowLeft } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
-import { portfolioApi } from '@/services/api'
+import { portfolioApi, type Wallet } from '@/services/api'
 
 interface WithdrawAssetProposal {
   symbol: string
@@ -17,29 +17,94 @@ interface WithdrawAssetProposal {
   value_usd: number
 }
 
+interface WithdrawAssetPayload {
+  symbol: string
+  units_to_sell: number
+  wallet_id?: number | null
+}
+
 interface WithdrawModalProps {
   isOpen: boolean
   onClose: () => void
-  onConfirm: (assets: Array<{ symbol: string; units_to_sell: number }>) => Promise<void>
+  onConfirm: (assets: WithdrawAssetPayload[]) => Promise<void>
   totalValue: number
+  /**
+   * Список кошельков портфеля. Используется для выбора кошелька списания
+   * по каждому активу (PLAN06 — Агент F12 / Агент 13).
+   *
+   *   * 0 / 1 кошелёк → колонка «Кошелёк» скрыта, бэкенд сам подберёт
+   *     кошелёк (стратегия max-units), wallet_id не отправляется.
+   *   * >1 кошельков → для каждого актива по умолчанию выбран кошелёк
+   *     с максимальным балансом, пользователь может переключить.
+   */
+  wallets?: Wallet[]
 }
 
 type Step = 'amount' | 'proposal' | 'success'
+
+/** Безопасное приведение `units` (number | string | null) к number. */
+function toUnitsNumber(value: number | string | null | undefined): number {
+  if (value === null || value === undefined) return 0
+  const n = typeof value === 'number' ? value : parseFloat(value)
+  return Number.isFinite(n) ? n : 0
+}
+
+/** units символа на конкретном кошельке (0, если такого holding нет). */
+function unitsOnWallet(wallet: Wallet | undefined, symbol: string): number {
+  if (!wallet) return 0
+  const h = (wallet.holdings ?? []).find((x) => x.symbol === symbol)
+  return toUnitsNumber(h?.units)
+}
 
 export function WithdrawModal({
   isOpen,
   onClose,
   onConfirm,
   totalValue,
+  wallets = [],
 }: WithdrawModalProps) {
   const [step, setStep] = useState<Step>('amount')
   const [amount, setAmount] = useState('')
   const [proposal, setProposal] = useState<WithdrawAssetProposal[] | null>(null)
   const [proposalTotalValue, setProposalTotalValue] = useState<number>(0)
   const [editedUnits, setEditedUnits] = useState<Record<string, number>>({})
+  // Выбранный кошелёк списания по каждому символу. null → бэкенд сам
+  // выберет кошелёк с max units (см. PLAN06 — Агент 13).
+  const [walletBySymbol, setWalletBySymbol] = useState<
+    Record<string, number | null>
+  >({})
   const [isLoading, setIsLoading] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Показываем колонку «Кошелёк» только если кошельков больше одного.
+  // При 0/1 кошельках UI остаётся прежним, бэкенд сам подберёт кошелёк.
+  const showWalletColumn = wallets.length > 1
+
+  /** wallet с максимальным балансом для symbol, или null если ни на одном нет. */
+  const pickDefaultWalletId = (symbol: string): number | null => {
+    let bestId: number | null = null
+    let bestUnits = 0
+    for (const w of wallets) {
+      const u = unitsOnWallet(w, symbol)
+      if (u > 0 && u > bestUnits) {
+        bestUnits = u
+        bestId = w.id
+      }
+    }
+    return bestId
+  }
+
+  /** Доступно units на выбранном кошельке (или Σ по всем, если кошелёк не задан). */
+  const availableUnits = (
+    symbol: string,
+    walletId: number | null,
+    fallback: number
+  ): number => {
+    if (walletId === null) return fallback
+    const w = wallets.find((x) => x.id === walletId)
+    return unitsOnWallet(w, symbol)
+  }
 
   const handleAmountSubmit = async () => {
     const numAmount = parseFloat(amount.replace(',', '.'))
@@ -62,6 +127,20 @@ export function WithdrawModal({
       setEditedUnits(
         Object.fromEntries(data.assets.map((a: WithdrawAssetProposal) => [a.symbol, a.units_to_sell]))
       )
+      // Дефолт: для каждого актива — кошелёк с максимальным балансом.
+      // Если кошельков нет / только один — оставляем null (бэкенд решает).
+      if (showWalletColumn) {
+        setWalletBySymbol(
+          Object.fromEntries(
+            data.assets.map((a: WithdrawAssetProposal) => [
+              a.symbol,
+              pickDefaultWalletId(a.symbol),
+            ])
+          )
+        )
+      } else {
+        setWalletBySymbol({})
+      }
       setStep('proposal')
     } catch (err: any) {
       setError(err.response?.data?.detail || err.message || 'Ошибка при расчёте предложения')
@@ -80,26 +159,78 @@ export function WithdrawModal({
     }))
   }
 
+  const handleWalletChange = (symbol: string, walletIdRaw: string) => {
+    const walletId = walletIdRaw === '' ? null : Number(walletIdRaw)
+    const nextId = walletId !== null && Number.isFinite(walletId) ? walletId : null
+    setWalletBySymbol((prev) => ({ ...prev, [symbol]: nextId }))
+    // Если новое количество > доступного на новом кошельке — обрезаем.
+    const a = proposal?.find((x) => x.symbol === symbol)
+    if (!a) return
+    const cap = availableUnits(symbol, nextId, a.units_current)
+    setEditedUnits((prev) => {
+      const cur = prev[symbol] ?? a.units_to_sell
+      if (cur > cap) {
+        return { ...prev, [symbol]: cap }
+      }
+      return prev
+    })
+  }
+
   const handleAccept = async () => {
     if (!proposal) return
 
-    const assets = proposal
-      .map((a) => ({
-        symbol: a.symbol,
-        units_to_sell: editedUnits[a.symbol] ?? a.units_to_sell,
-      }))
-      .filter((a) => a.units_to_sell > 0)
+    const assets: WithdrawAssetPayload[] = proposal
+      .map((a) => {
+        const walletId = walletBySymbol[a.symbol] ?? null
+        const cap = availableUnits(a.symbol, walletId, a.units_current)
+        const units = editedUnits[a.symbol] ?? a.units_to_sell
+        // Защита: если количество > доступного на выбранном кошельке —
+        // это валидационная ошибка, не отправляем заведомо плохой запрос.
+        return {
+          symbol: a.symbol,
+          units_to_sell: units,
+          wallet_id: walletId,
+          _cap: cap,
+          _walletName:
+            walletId !== null
+              ? wallets.find((w) => w.id === walletId)?.name ?? null
+              : null,
+        }
+      })
+      .filter((a) => a.units_to_sell > 0) as Array<
+      WithdrawAssetPayload & { _cap: number; _walletName: string | null }
+    >
 
     if (assets.length === 0) {
       setError('Укажите количество для вывода хотя бы по одному активу')
       return
     }
 
+    // Валидация: каждое количество должно умещаться на выбранном кошельке.
+    for (const a of assets) {
+      if (a.units_to_sell - a._cap > 1e-9) {
+        const where = a._walletName
+          ? `на кошельке «${a._walletName}»`
+          : 'в портфеле'
+        setError(
+          `Для ${a.symbol} ${where} доступно ${a._cap.toFixed(8)} — это ` +
+            `меньше указанных ${a.units_to_sell.toFixed(8)}.`
+        )
+        return
+      }
+    }
+
     setIsLoading(true)
     setError(null)
 
     try {
-      await onConfirm(assets)
+      await onConfirm(
+        assets.map(({ symbol, units_to_sell, wallet_id }) => ({
+          symbol,
+          units_to_sell,
+          wallet_id,
+        }))
+      )
       setShowSuccess(true)
       setStep('success')
     } catch (err: any) {
@@ -115,6 +246,7 @@ export function WithdrawModal({
     setProposal(null)
     setProposalTotalValue(0)
     setEditedUnits({})
+    setWalletBySymbol({})
     setError(null)
     onClose()
   }
@@ -124,6 +256,7 @@ export function WithdrawModal({
     setProposal(null)
     setProposalTotalValue(0)
     setEditedUnits({})
+    setWalletBySymbol({})
     setError(null)
   }
 
@@ -133,6 +266,7 @@ export function WithdrawModal({
     setProposal(null)
     setProposalTotalValue(0)
     setEditedUnits({})
+    setWalletBySymbol({})
     setShowSuccess(false)
     setError(null)
     onClose()
@@ -145,19 +279,22 @@ export function WithdrawModal({
       setProposal(null)
       setProposalTotalValue(0)
       setEditedUnits({})
+      setWalletBySymbol({})
       setError(null)
       setShowSuccess(false)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen])
 
   // Сумма к выводу: используем value_usd из предложения, при редактировании — пропорционально
-  const totalWithdrawValue = proposal
-    ? proposal.reduce((sum, a) => {
-        const units = editedUnits[a.symbol] ?? a.units_to_sell
-        const ratio = a.units_to_sell > 0 ? units / a.units_to_sell : 0
-        return sum + a.value_usd * ratio
-      }, 0)
-    : 0
+  const totalWithdrawValue = useMemo(() => {
+    if (!proposal) return 0
+    return proposal.reduce((sum, a) => {
+      const units = editedUnits[a.symbol] ?? a.units_to_sell
+      const ratio = a.units_to_sell > 0 ? units / a.units_to_sell : 0
+      return sum + a.value_usd * ratio
+    }, 0)
+  }, [proposal, editedUnits])
 
   const valueAfterWithdraw = Math.max(0, proposalTotalValue - totalWithdrawValue)
 
@@ -235,40 +372,81 @@ export function WithdrawModal({
           </p>
         </div>
         <p className="text-sm text-gray-600">
-          Вы можете изменить количество единиц по каждому активу.
+          {showWalletColumn
+            ? 'Вы можете изменить количество и выбрать кошелёк списания для каждого актива. По умолчанию выбран кошелёк с максимальным балансом.'
+            : 'Вы можете изменить количество единиц по каждому активу.'}
         </p>
         <div className="overflow-x-auto rounded-lg border border-gray-200">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 border-b border-gray-200">
                 <th className="px-4 py-2 text-left font-medium text-gray-700">Актив</th>
-                <th className="px-4 py-2 text-right font-medium text-gray-700">Всего</th>
+                {showWalletColumn && (
+                  <th className="px-4 py-2 text-left font-medium text-gray-700">Кошелёк</th>
+                )}
+                <th className="px-4 py-2 text-right font-medium text-gray-700">
+                  {showWalletColumn ? 'Доступно' : 'Всего'}
+                </th>
                 <th className="px-4 py-2 text-right font-medium text-gray-700">К выводу</th>
                 <th className="px-4 py-2 text-right font-medium text-gray-700">Сумма ($)</th>
               </tr>
             </thead>
             <tbody>
               {proposal?.map((a) => {
+                const walletId = walletBySymbol[a.symbol] ?? null
+                const cap = availableUnits(a.symbol, walletId, a.units_current)
                 const units = editedUnits[a.symbol] ?? a.units_to_sell
                 const ratio = a.units_to_sell > 0 ? units / a.units_to_sell : 0
                 const value = a.value_usd * ratio
+                // Кандидаты-кошельки: только те, на которых реально есть актив.
+                // Если ни на одном нет (например, рассинхрон) — показываем все,
+                // чтобы пользователь хотя бы мог выбрать.
+                const candidates = (() => {
+                  const withUnits = wallets.filter(
+                    (w) => unitsOnWallet(w, a.symbol) > 0
+                  )
+                  return withUnits.length > 0 ? withUnits : wallets
+                })()
                 return (
                   <tr key={a.symbol} className="border-b border-gray-100 last:border-0">
                     <td className="px-4 py-2">
                       <span className="font-medium text-gray-900">{a.symbol}</span>
                       <span className="text-gray-500 ml-1">({a.name})</span>
                     </td>
+                    {showWalletColumn && (
+                      <td className="px-4 py-2">
+                        <select
+                          value={walletId !== null ? String(walletId) : ''}
+                          onChange={(e) => handleWalletChange(a.symbol, e.target.value)}
+                          className="w-full px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-primary-500 text-sm"
+                        >
+                          {candidates.length === 0 && (
+                            <option value="">— нет кошельков —</option>
+                          )}
+                          {candidates.map((w) => {
+                            const u = unitsOnWallet(w, a.symbol)
+                            return (
+                              <option key={w.id} value={w.id}>
+                                {w.name}
+                                {w.is_default ? ' (по умолчанию)' : ''}
+                                {u > 0 ? ` — ${u.toFixed(8)}` : ' — 0'}
+                              </option>
+                            )
+                          })}
+                        </select>
+                      </td>
+                    )}
                     <td className="px-4 py-2 text-right text-gray-600">
-                      {a.units_current.toFixed(8)}
+                      {cap.toFixed(8)}
                     </td>
                     <td className="px-4 py-2">
                       <input
                         type="number"
                         min="0"
-                        max={a.units_current}
+                        max={cap}
                         step="0.00000001"
                         value={editedUnits[a.symbol] ?? a.units_to_sell}
-                        onChange={(e) => handleUnitsChange(a.symbol, e.target.value, a.units_current)}
+                        onChange={(e) => handleUnitsChange(a.symbol, e.target.value, cap)}
                         className="w-full text-right px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-primary-500"
                       />
                     </td>

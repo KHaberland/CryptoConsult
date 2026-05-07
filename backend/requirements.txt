@@ -4,3 +4,7 @@ django-cors-headers>=4.3
 requests>=2.31
 openai>=1.0
 python-dotenv>=1.0
+
+# --- dev / tests ---
+pytest>=8.0
+pytest-django>=4.8

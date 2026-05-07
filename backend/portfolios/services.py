@@ -5,6 +5,7 @@
 import requests
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
+from decimal import Decimal
 import logging
 import threading
 import time
@@ -594,6 +595,54 @@ class PriceService:
         """Проверить, поддерживается ли символ."""
         return symbol.upper() in cls.SYMBOL_TO_ID
 
+    @classmethod
+    def get_stablecoin_symbols(cls) -> List[str]:
+        """Стейблкоины, доступные для swap по умолчанию."""
+        return ['USDT', 'USDC']
+
+    def get_available_for_trade(self, portfolio_symbols: List[str]) -> List[Dict]:
+        """
+        Список монет, доступных для покупки/обмена в активном портфеле:
+        union(текущие активы портфеля, ТОП-10, стейблкоины).
+
+        Returns:
+            Список словарей вида:
+            {symbol, name, current_price, is_recommended, in_portfolio, is_stable}
+        """
+        top10 = self.get_top10_recommended_assets()
+        top_map = {(c.get('symbol') or '').upper(): c for c in top10 if c.get('symbol')}
+        portfolio_set = {(s or '').upper() for s in portfolio_symbols if s}
+        stables = set(self.get_stablecoin_symbols())
+
+        symbols = sorted(portfolio_set | set(top_map.keys()) | stables)
+
+        # Подтягиваем цены пачкой одним запросом
+        prices = self.get_prices(symbols)
+
+        result: List[Dict] = []
+        for sym in symbols:
+            top_data = top_map.get(sym, {})
+            name = top_data.get('name') or sym
+            price = prices.get(sym)
+            if price is None:
+                price = top_data.get('current_price') or 0
+                if sym in stables and not price:
+                    price = 1.0
+            result.append({
+                'symbol': sym,
+                'name': name,
+                'current_price': float(price or 0),
+                'is_recommended': sym in top_map,
+                'in_portfolio': sym in portfolio_set,
+                'is_stable': sym in stables,
+            })
+
+        # Сортировка: сначала текущие портфельные, затем ТОП-10, затем остальные
+        result.sort(
+            key=lambda x: (not x['in_portfolio'], not x['is_recommended'], x['symbol'])
+        )
+        return result
+
     # Стейблкойны по символу (CoinGecko)
     STABLECOIN_SYMBOLS = frozenset({
         "usdt", "usdc", "busd", "dai", "tusd", "usdd", "pyusd", "usds", "usde",
@@ -653,6 +702,53 @@ class PriceService:
             if stale:
                 return stale
             return []
+
+    def get_top10_recommended_symbols(self) -> List[str]:
+        """
+        ТОП-10 ликвидных криптовалют для долгосрочного инвестирования
+        (CoinGecko по капитализации, исключая стейблкоины).
+        Используется для валидации импортируемого портфеля.
+        """
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        if not top:
+            return ["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "TRX", "DOT", "LINK"]
+
+        result: List[str] = []
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            if not sym:
+                continue
+            if (coin.get("symbol") or "").lower() in self.STABLECOIN_SYMBOLS:
+                continue
+            result.append(sym)
+            if len(result) >= 10:
+                break
+        return result[:10]
+
+    def get_top10_recommended_assets(self) -> List[Dict]:
+        """
+        То же, что get_top10_recommended_symbols, но с расширенными данными
+        (имя, цена, market_cap) для UI-выбора при импорте.
+        """
+        top = self.fetch_top_coins_from_coingecko(per_page=15)
+        if not top:
+            return []
+        result: List[Dict] = []
+        for coin in top:
+            sym = (coin.get("symbol") or "").upper()
+            if not sym:
+                continue
+            if (coin.get("symbol") or "").lower() in self.STABLECOIN_SYMBOLS:
+                continue
+            result.append({
+                "symbol": sym,
+                "name": coin.get("name") or sym,
+                "current_price": coin.get("current_price") or 0,
+                "market_cap": coin.get("market_cap") or 0,
+            })
+            if len(result) >= 10:
+                break
+        return result
 
     def get_beginner_portfolio_assets(self) -> List[Dict]:
         """
@@ -1003,3 +1099,236 @@ class PriceService:
         if abs(total - 100.0) > 0.01 and assets:
             assets[-1]["percentage"] = round(assets[-1]["percentage"] + (100.0 - total), 2)
         return assets
+
+
+def recompute_percentages_by_market(portfolio, prices: Dict[str, float]) -> None:
+    """
+    Пересчитать `PortfolioAsset.percentage` пропорционально текущей рыночной
+    стоимости активов портфеля.
+
+    Args:
+        portfolio: экземпляр Portfolio.
+        prices: словарь {symbol: current_price_usd}. Если цены для какого-то
+            символа нет, используется initial_price актива.
+
+    Если суммарная рыночная стоимость <= 0 — функция ничего не меняет.
+    Остаточная погрешность округления записывается в последний актив,
+    чтобы Σ percentage == 100.
+    """
+    assets = list(portfolio.assets.all())
+    if not assets:
+        return
+
+    values: List[float] = []
+    total = 0.0
+    for asset in assets:
+        units = float(asset.units or 0)
+        price = prices.get(asset.symbol)
+        if price is None or price <= 0:
+            price = float(asset.initial_price or 0)
+        v = units * float(price or 0)
+        values.append(v)
+        total += v
+
+    if total <= 0:
+        return
+
+    for asset, v in zip(assets, values):
+        asset.percentage = round(v / total * 100, 2)
+        asset.save(update_fields=['percentage'])
+
+    # Выравниваем округление, чтобы Σ percentage == 100
+    refreshed = list(portfolio.assets.all())
+    diff = 100.0 - sum(float(a.percentage or 0) for a in refreshed)
+    if abs(diff) > 0.001 and refreshed:
+        last = refreshed[-1]
+        last.percentage = round(float(last.percentage or 0) + diff, 2)
+        last.save(update_fields=['percentage'])
+
+
+class WalletLedger:
+    """Сервис управления балансами по кошелькам.
+
+    Поддерживает инвариант:
+        PortfolioAsset.units == Σ WalletHolding.units по всем кошелькам портфеля
+        для данного symbol.
+
+    Все вычисления выполняются в Decimal — без float, чтобы не терять точность
+    при сложении/вычитании единиц активов (см. PLAN06-realization.md, Агент 7).
+    """
+
+    DEFAULT_WALLET_NAME = "Общий кошелёк"
+    DEFAULT_WALLET_TYPE = "other"
+    ZERO = Decimal("0")
+
+    @staticmethod
+    def _to_decimal(value) -> Decimal:
+        """Привести значение к Decimal без потери точности."""
+        if value is None:
+            return WalletLedger.ZERO
+        if isinstance(value, Decimal):
+            return value
+        # str(...) важен — иначе float конвертится с ошибкой представления.
+        return Decimal(str(value))
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        return (symbol or "").strip().upper()
+
+    @classmethod
+    def get_default_wallet(cls, portfolio):
+        """Получить (или создать) default-кошелёк портфеля.
+
+        Логика:
+            1) если уже есть Wallet с is_default=True — возвращаем его;
+            2) если есть Wallet с именем DEFAULT_WALLET_NAME — помечаем его
+               как default и возвращаем;
+            3) иначе создаём новый default Wallet.
+        """
+        from .models import Wallet
+
+        wallet = Wallet.objects.filter(portfolio=portfolio, is_default=True).first()
+        if wallet is not None:
+            return wallet
+
+        named = Wallet.objects.filter(
+            portfolio=portfolio, name=cls.DEFAULT_WALLET_NAME
+        ).first()
+        if named is not None:
+            named.is_default = True
+            named.save(update_fields=["is_default", "updated_at"])
+            return named
+
+        return Wallet.objects.create(
+            portfolio=portfolio,
+            name=cls.DEFAULT_WALLET_NAME,
+            type=cls.DEFAULT_WALLET_TYPE,
+            is_default=True,
+            note="",
+        )
+
+    @classmethod
+    def get_or_create_holding(cls, wallet, symbol: str):
+        """Получить или создать WalletHolding для пары (wallet, symbol)."""
+        from .models import WalletHolding
+
+        sym = cls._normalize_symbol(symbol)
+        if not sym:
+            raise ValueError("symbol обязателен")
+
+        holding, _ = WalletHolding.objects.get_or_create(
+            wallet=wallet,
+            symbol=sym,
+            defaults={"units": cls.ZERO},
+        )
+        return holding
+
+    @classmethod
+    def add_units(cls, wallet, symbol: str, delta) -> "WalletHolding":  # type: ignore[name-defined]
+        """Добавить delta к WalletHolding.units (delta может быть отрицательной).
+
+        Бросает ValueError, если итоговый баланс уходит в минус.
+        Возвращает обновлённый WalletHolding.
+        """
+        delta_dec = cls._to_decimal(delta)
+        holding = cls.get_or_create_holding(wallet, symbol)
+        current = cls._to_decimal(holding.units)
+        new_value = current + delta_dec
+
+        if new_value < cls.ZERO:
+            raise ValueError(
+                f"Недостаточно баланса {cls._normalize_symbol(symbol)} "
+                f"на кошельке '{wallet.name}': есть {current}, требуется {-delta_dec}"
+            )
+
+        holding.units = new_value
+        holding.save(update_fields=["units", "updated_at"])
+        return holding
+
+    @classmethod
+    def aggregate_units(cls, portfolio, symbol: str) -> Decimal:
+        """Σ WalletHolding.units по всем кошелькам портфеля для symbol."""
+        from django.db.models import Sum
+        from .models import WalletHolding
+
+        sym = cls._normalize_symbol(symbol)
+        if not sym:
+            return cls.ZERO
+
+        total = WalletHolding.objects.filter(
+            wallet__portfolio=portfolio, symbol=sym
+        ).aggregate(total=Sum("units"))["total"]
+
+        return cls._to_decimal(total)
+
+    @classmethod
+    def sync_aggregate(cls, portfolio, symbol: str):
+        """Обновить PortfolioAsset.units суммой WalletHolding.units.
+
+        Возвращает обновлённый PortfolioAsset или None, если такого актива нет.
+        """
+        from .models import PortfolioAsset
+
+        sym = cls._normalize_symbol(symbol)
+        if not sym:
+            return None
+
+        total = cls.aggregate_units(portfolio, sym)
+
+        asset = PortfolioAsset.objects.filter(
+            portfolio=portfolio, symbol=sym
+        ).first()
+        if asset is None:
+            return None
+
+        asset.units = total
+        asset.save(update_fields=["units"])
+        return asset
+
+    @classmethod
+    def sync_all(cls, portfolio) -> int:
+        """Синхронизировать units всех PortfolioAsset портфеля по WalletHolding.
+
+        Возвращает количество обновлённых активов.
+        """
+        updated = 0
+        for asset in portfolio.assets.all():
+            if cls.sync_aggregate(portfolio, asset.symbol) is not None:
+                updated += 1
+        return updated
+
+    @classmethod
+    def ensure_consistent_holdings(cls, portfolio):
+        """Лениво заполнить WalletHolding для портфелей, у которых сумма
+        WalletHolding.units меньше PortfolioAsset.units.
+
+        Зачем нужно:
+            * портфели, созданные до миграции 0008 (или в тестах в обход
+              миграции), имеют PortfolioAsset.units > 0, но Σ WalletHolding.units
+              может быть равна 0;
+            * перед любой операцией над балансами через WalletLedger нужно
+              привести систему к консистентному состоянию, иначе sync_aggregate
+              "обнулит" исторические остатки.
+
+        Логика:
+            * для каждого PortfolioAsset считаем aggregate = Σ WalletHolding.units;
+            * если aggregate < asset.units — добавляем разницу в default-кошелёк;
+            * если aggregate >= asset.units — ничего не делаем (уже синхронно
+              или избыток на стороне кошельков, который сам исправит
+              sync_aggregate в дальнейшем).
+
+        Идемпотентно: повторный вызов — no-op.
+
+        Возвращает default Wallet (создаст при необходимости).
+        """
+        default_wallet = cls.get_default_wallet(portfolio)
+        for asset in portfolio.assets.all():
+            sym = cls._normalize_symbol(asset.symbol)
+            if not sym:
+                continue
+            aggregate = cls.aggregate_units(portfolio, sym)
+            asset_units = cls._to_decimal(asset.units)
+            if aggregate < asset_units:
+                diff = asset_units - aggregate
+                cls.add_units(default_wallet, sym, diff)
+        return default_wallet

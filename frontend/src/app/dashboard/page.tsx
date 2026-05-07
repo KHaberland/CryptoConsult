@@ -13,10 +13,14 @@ import { ApiKeyBanner } from '@/components/ui/ApiKeyBanner'
 import { Progress } from '@/components/ui/Progress'
 import { ContributeModal } from '@/components/portfolio/ContributeModal'
 import { WithdrawModal } from '@/components/portfolio/WithdrawModal'
+import { SwapModal } from '@/components/portfolio/SwapModal'
+import { WalletsSection } from '@/components/portfolio/WalletsSection'
+import { AdjustHoldingModal } from '@/components/portfolio/AdjustHoldingModal'
 import { ForecastModal } from '@/components/forecast/ForecastModal'
 import { BtcAnalysisModal } from '@/components/forecast/BtcAnalysisModal'
 import { chatApi, versionApi } from '@/services/api'
-import { formatCurrency, formatPercent, formatDate } from '@/lib/utils'
+import type { Wallet as WalletType, WalletHolding } from '@/services/api'
+import { formatCurrency, formatPercent, formatDate, formatUnits } from '@/lib/utils'
 import {
   TrendingUp,
   TrendingDown,
@@ -28,15 +32,27 @@ import {
   PlusCircle,
   Wallet,
   BarChart3,
+  AlertTriangle,
+  ArrowLeftRight,
+  Info,
+  Pencil,
 } from 'lucide-react'
 import { getDcaEntriesWithCumulative } from '@/lib/dca'
+
+const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC'])
 
 export default function DashboardPage() {
   const router = useRouter()
   const [showContributeModal, setShowContributeModal] = useState(false)
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
+  const [showSwapModal, setShowSwapModal] = useState(false)
   const [showForecastModal, setShowForecastModal] = useState(false)
   const [showBtcAnalysisModal, setShowBtcAnalysisModal] = useState(false)
+  const [usdcInfoDismissed, setUsdcInfoDismissed] = useState<boolean>(true)
+  const [adjustTarget, setAdjustTarget] = useState<{
+    wallet: WalletType
+    holding: WalletHolding
+  } | null>(null)
   const [btcAnalysisData, setBtcAnalysisData] = useState<{
     sections: Array<{ title: string; content: string }>
     forecast_6months: string
@@ -65,7 +81,11 @@ export default function DashboardPage() {
     fetchPortfolioValue,
     fetchProfile,
     contribute,
+    contributeByUnits,
     withdraw,
+    swap,
+    wallets,
+    adjustHolding,
   } = usePortfolioStore()
   
   // Инициализация сессии
@@ -88,6 +108,20 @@ export default function DashboardPage() {
       .then((data) => setApiKeyConfigured(data.api_key_configured))
       .catch(() => setApiKeyConfigured(null))
   }, [isReady])
+
+  // Чтение статуса USDC-информера из localStorage (один раз показываем)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const dismissed = window.localStorage.getItem('usdc_info_dismissed') === '1'
+    setUsdcInfoDismissed(dismissed)
+  }, [])
+
+  const handleDismissUsdcInfo = () => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('usdc_info_dismissed', '1')
+    }
+    setUsdcInfoDismissed(true)
+  }
   
   // Если нет профиля — редирект на анкету
   useEffect(() => {
@@ -182,6 +216,102 @@ export default function DashboardPage() {
   const displayProfitLossPercent = portfolioValue.profit_loss_percent
   const isProfit = portfolioValue.profit_loss >= 0
 
+  // Активы вне ТОП-10 (для импортированных портфелей).
+  const allNonRecommendedAssets = portfolioValue.assets.filter(
+    (a) => a.is_recommended === false,
+  )
+
+  const aggregatedAssets = showDcaBreakdown ? displayAssets : portfolioValue.assets
+
+  // Карта агрегатных метрик по symbol — нужна, чтобы подмешать к каждому
+  // wallet-holding цену/24ч/PL%, которые считает бэкенд.
+  const aggregatedBySymbol = new Map(aggregatedAssets.map((a) => [a.symbol, a]))
+
+  // Сумма units по каждому symbol — для пропорционального распределения PL
+  // и initial_value между кошельками.
+  const totalUnitsBySymbol = new Map<string, number>()
+  for (const w of wallets) {
+    for (const h of w.holdings ?? []) {
+      const u = typeof h.units === 'number' ? h.units : parseFloat(String(h.units))
+      if (Number.isFinite(u)) {
+        totalUnitsBySymbol.set(h.symbol, (totalUnitsBySymbol.get(h.symbol) ?? 0) + u)
+      }
+    }
+  }
+
+  // Сортируем кошельки: дефолтный — первым, далее по имени.
+  const walletsSorted = [...wallets].sort((a, b) => {
+    if (a.is_default !== b.is_default) return a.is_default ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+
+  type WalletAssetRow = {
+    key: string
+    wallet: WalletType
+    holding: WalletHolding
+    symbol: string
+    name: string
+    units: number
+    current_price: number
+    current_value: number
+    change_24h: number
+    profit_loss: number
+    profit_loss_percent: number
+    percentage: number
+    is_recommended?: boolean
+  }
+
+  const walletAssetRows: WalletAssetRow[] = []
+  for (const w of walletsSorted) {
+    for (const h of w.holdings ?? []) {
+      const units =
+        typeof h.units === 'number' ? h.units : parseFloat(String(h.units))
+      if (!Number.isFinite(units) || units <= 0) continue
+      const agg = aggregatedBySymbol.get(h.symbol)
+      const valueUsd =
+        h.value_usd !== null && h.value_usd !== undefined
+          ? typeof h.value_usd === 'number'
+            ? h.value_usd
+            : parseFloat(String(h.value_usd))
+          : NaN
+      const totalUnits = totalUnitsBySymbol.get(h.symbol) ?? 0
+      const share = totalUnits > 0 ? units / totalUnits : 0
+      const current_price = agg?.current_price ?? 0
+      const current_value = Number.isFinite(valueUsd)
+        ? valueUsd
+        : units * current_price
+      const initial_value = (agg?.initial_value ?? 0) * share
+      const profit_loss = current_value - initial_value
+      const profit_loss_percent = agg?.profit_loss_percent ?? 0
+      const percentage =
+        displayTotalValue > 0 ? (current_value / displayTotalValue) * 100 : 0
+      walletAssetRows.push({
+        key: `${w.id}:${h.symbol}`,
+        wallet: w,
+        holding: h,
+        symbol: h.symbol,
+        name: agg?.name ?? h.symbol,
+        units,
+        current_price,
+        current_value,
+        change_24h: agg?.change_24h ?? 0,
+        profit_loss,
+        profit_loss_percent,
+        percentage,
+        is_recommended: agg?.is_recommended,
+      })
+    }
+  }
+
+  // Если данных по кошелькам ещё нет — показываем старую агрегированную таблицу.
+  const showWalletBreakdown = walletAssetRows.length > 0
+  const usdcAsset = allNonRecommendedAssets.find((a) => a.symbol === 'USDC')
+  const nonRecommendedAssets = allNonRecommendedAssets.filter(
+    (a) => a.symbol !== 'USDC',
+  )
+  const hasUsdc = !!usdcAsset
+  const hasNonRecommended = nonRecommendedAssets.length > 0
+
   return (
     <div className="min-h-screen bg-gray-50">
       <Header />
@@ -194,6 +324,63 @@ export default function DashboardPage() {
           <Alert variant="error" className="mb-6">
             {error}
           </Alert>
+        )}
+        {hasUsdc && !usdcInfoDismissed && (
+          <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4">
+            <div className="flex items-start gap-3 text-blue-900">
+              <Info className="w-5 h-5 mt-0.5 shrink-0" />
+              <div className="text-sm space-y-2 flex-1">
+                <p className="font-medium">
+                  Стейблкоин USDC — стратегический кэш
+                </p>
+                <p>
+                  В портфеле присутствует доля стейблкоина <strong>USDC</strong>,
+                  выполняющего функцию ликвидного резерва и управления риском.
+                  Текущая доля USDC (~5–15%) является допустимой и
+                  соответствует практике управления рисками в условиях
+                  рыночной волатильности.
+                </p>
+                <p>Рекомендуется сохранять USDC как стратегический кэш для:</p>
+                <ul className="list-disc list-inside space-y-0.5 ml-1">
+                  <li>докупки активов на коррекциях;</li>
+                  <li>ребалансировки портфеля;</li>
+                  <li>обеспечения ликвидности.</li>
+                </ul>
+                <p>
+                  Конвертация USDC в инвестиционные активы должна
+                  осуществляться по сигналам рынка и стратегии распределения
+                  капитала.
+                </p>
+                <div className="pt-2">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={handleDismissUsdcInfo}
+                  >
+                    Ок
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {hasNonRecommended && (
+          <div className="mb-6 rounded-lg border border-orange-200 bg-orange-50 p-4">
+            <div className="flex items-start gap-3 text-orange-800">
+              <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0" />
+              <div className="text-sm space-y-1">
+                <p className="font-medium">
+                  В вашем портфеле есть активы вне ТОП-10
+                </p>
+                <p>
+                  {nonRecommendedAssets.map((a) => a.symbol).join(', ')} — эти
+                  альткойны не относятся к рекомендуемым для долгосрочного
+                  инвестирования. Рассмотрите их обмен на одну из монет ТОП-10
+                  согласно нашим рекомендациям.
+                </p>
+              </div>
+            </div>
+          </div>
         )}
         
         {/* Portfolio Summary */}
@@ -407,6 +594,15 @@ export default function DashboardPage() {
               <Button
                 className="w-full"
                 variant="secondary"
+                onClick={() => setShowSwapModal(true)}
+                disabled={displayAssets.length === 0}
+              >
+                <ArrowLeftRight className="w-4 h-4 mr-1" />
+                Обменять
+              </Button>
+              <Button
+                className="w-full"
+                variant="secondary"
                 onClick={() => setShowWithdrawModal(true)}
               >
                 <Wallet className="w-4 h-4 mr-1" />
@@ -416,6 +612,9 @@ export default function DashboardPage() {
           </Card>
         </div>
         
+        {/* Мои кошельки */}
+        <WalletsSection />
+
         {/* Assets Table */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
@@ -432,59 +631,189 @@ export default function DashboardPage() {
                 <thead>
                   <tr className="text-left text-sm text-gray-600 border-b">
                     <th className="pb-3 font-medium">Актив</th>
+                    {showWalletBreakdown && (
+                      <th className="pb-3 font-medium">Кошелёк</th>
+                    )}
                     <th className="pb-3 font-medium text-right">Доля</th>
+                    <th className="pb-3 font-medium text-right">Количество</th>
                     <th className="pb-3 font-medium text-right">Цена</th>
                     <th className="pb-3 font-medium text-right">24ч</th>
                     <th className="pb-3 font-medium text-right">Стоимость</th>
                     <th className="pb-3 font-medium text-right">P/L</th>
+                    {showWalletBreakdown && (
+                      <th className="pb-3 font-medium text-right w-10" aria-label="Действия" />
+                    )}
                   </tr>
                 </thead>
                 <tbody>
-                  {(showDcaBreakdown ? displayAssets : portfolioValue.assets).map((asset) => (
-                    <tr key={asset.symbol} className="border-b last:border-0">
-                      <td className="py-4">
-                        <div className="flex items-center">
-                          <div className="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center mr-3">
-                            <span className="text-xs font-bold text-primary-600">
-                              {asset.symbol.slice(0, 2)}
+                  {showWalletBreakdown
+                    ? walletAssetRows.map((row) => (
+                        <tr key={row.key} className="border-b last:border-0">
+                          <td className="py-4">
+                            <div className="flex items-center">
+                              <div className="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center mr-3">
+                                <span className="text-xs font-bold text-primary-600">
+                                  {row.symbol.slice(0, 2)}
+                                </span>
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <p className="font-medium text-gray-900">{row.symbol}</p>
+                                  {row.is_recommended === false &&
+                                    (STABLECOIN_SYMBOLS.has(row.symbol) ? (
+                                      <span
+                                        className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700"
+                                        title="Стейблкоин — стратегический кэш для ребалансировки и докупки на коррекциях."
+                                      >
+                                        <Info className="w-3 h-3" />
+                                        стейблкоин
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700"
+                                        title="Не входит в ТОП-10. Рекомендуем обмен на актив из ТОП-10."
+                                      >
+                                        <AlertTriangle className="w-3 h-3" />
+                                        не ТОП-10
+                                      </span>
+                                    ))}
+                                </div>
+                                <p className="text-sm text-gray-500">{row.name}</p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-4">
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-900">{row.wallet.name}</span>
+                              {row.wallet.is_default && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary-100 text-primary-700">
+                                  по умолчанию
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900 tabular-nums">
+                              {row.percentage.toFixed(2)}%
                             </span>
-                          </div>
-                          <div>
-                            <p className="font-medium text-gray-900">{asset.symbol}</p>
-                            <p className="text-sm text-gray-500">{asset.name}</p>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-4 text-right">
-                        <span className="text-gray-900">{asset.percentage}%</span>
-                      </td>
-                      <td className="py-4 text-right">
-                        <span className="text-gray-900">
-                          {formatCurrency(asset.current_price)}
-                        </span>
-                      </td>
-                      <td className="py-4 text-right">
-                        <span className={asset.change_24h >= 0 ? 'text-green-600' : 'text-red-600'}>
-                          {formatPercent(asset.change_24h)}
-                        </span>
-                      </td>
-                      <td className="py-4 text-right">
-                        <span className="text-gray-900 font-medium">
-                          {formatCurrency(asset.current_value)}
-                        </span>
-                      </td>
-                      <td className="py-4 text-right">
-                        <div className={asset.profit_loss >= 0 ? 'text-green-600' : 'text-red-600'}>
-                          <span className="font-medium">
-                            {formatCurrency(asset.profit_loss)}
-                          </span>
-                          <span className="text-sm ml-1">
-                            ({formatPercent(asset.profit_loss_percent)})
-                          </span>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900 tabular-nums">
+                              {formatUnits(row.units)}{' '}
+                              <span className="text-gray-500 text-sm">{row.symbol}</span>
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900">
+                              {formatCurrency(row.current_price)}
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className={row.change_24h >= 0 ? 'text-green-600' : 'text-red-600'}>
+                              {formatPercent(row.change_24h)}
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900 font-medium tabular-nums">
+                              {formatCurrency(row.current_value)}
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <div className={row.profit_loss >= 0 ? 'text-green-600' : 'text-red-600'}>
+                              <span className="font-medium tabular-nums">
+                                {formatCurrency(row.profit_loss)}
+                              </span>
+                              <span className="text-sm ml-1">
+                                ({formatPercent(row.profit_loss_percent)})
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-4 text-right">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setAdjustTarget({ wallet: row.wallet, holding: row.holding })
+                              }
+                              className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-700"
+                              aria-label={`Скорректировать ${row.symbol} в кошельке ${row.wallet.name}`}
+                              title="Скорректировать баланс"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    : aggregatedAssets.map((asset) => (
+                        <tr key={asset.symbol} className="border-b last:border-0">
+                          <td className="py-4">
+                            <div className="flex items-center">
+                              <div className="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center mr-3">
+                                <span className="text-xs font-bold text-primary-600">
+                                  {asset.symbol.slice(0, 2)}
+                                </span>
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <p className="font-medium text-gray-900">{asset.symbol}</p>
+                                  {asset.is_recommended === false &&
+                                    (STABLECOIN_SYMBOLS.has(asset.symbol) ? (
+                                      <span
+                                        className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700"
+                                        title="Стейблкоин — стратегический кэш для ребалансировки и докупки на коррекциях."
+                                      >
+                                        <Info className="w-3 h-3" />
+                                        стейблкоин
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700"
+                                        title="Не входит в ТОП-10. Рекомендуем обмен на актив из ТОП-10."
+                                      >
+                                        <AlertTriangle className="w-3 h-3" />
+                                        не ТОП-10
+                                      </span>
+                                    ))}
+                                </div>
+                                <p className="text-sm text-gray-500">{asset.name}</p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900">{asset.percentage}%</span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900 tabular-nums">
+                              {formatUnits(asset.units)}{' '}
+                              <span className="text-gray-500 text-sm">{asset.symbol}</span>
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900">
+                              {formatCurrency(asset.current_price)}
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className={asset.change_24h >= 0 ? 'text-green-600' : 'text-red-600'}>
+                              {formatPercent(asset.change_24h)}
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <span className="text-gray-900 font-medium">
+                              {formatCurrency(asset.current_value)}
+                            </span>
+                          </td>
+                          <td className="py-4 text-right">
+                            <div className={asset.profit_loss >= 0 ? 'text-green-600' : 'text-red-600'}>
+                              <span className="font-medium">
+                                {formatCurrency(asset.profit_loss)}
+                              </span>
+                              <span className="text-sm ml-1">
+                                ({formatPercent(asset.profit_loss_percent)})
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
                 </tbody>
               </table>
             </div>
@@ -498,9 +827,13 @@ export default function DashboardPage() {
         onConfirm={async (amt) => {
           await contribute(amt)
         }}
+        onConfirmUnits={async (items, walletId) => {
+          await contributeByUnits(items, walletId)
+        }}
         investedSoFar={investedSoFar}
         totalPlanned={totalInvestment > 0 ? totalInvestment : undefined}
         suggestedAmount={suggestedAmount}
+        wallets={wallets}
       />
       <WithdrawModal
         isOpen={showWithdrawModal}
@@ -509,6 +842,20 @@ export default function DashboardPage() {
           await withdraw(assets)
         }}
         totalValue={displayTotalValue}
+        wallets={wallets}
+      />
+      <SwapModal
+        isOpen={showSwapModal}
+        onClose={() => setShowSwapModal(false)}
+        onConfirm={async (data, walletId) => {
+          await swap(data, walletId)
+        }}
+        portfolioAssets={displayAssets.map((a) => ({
+          symbol: a.symbol,
+          name: a.name,
+          current_price: a.current_price,
+        }))}
+        wallets={wallets}
       />
       <ForecastModal
         isOpen={showForecastModal}
@@ -523,6 +870,13 @@ export default function DashboardPage() {
         data={btcAnalysisData}
         isLoading={btcAnalysisLoading}
         error={btcAnalysisError}
+      />
+      <AdjustHoldingModal
+        isOpen={adjustTarget !== null}
+        onClose={() => setAdjustTarget(null)}
+        onConfirm={adjustHolding}
+        wallet={adjustTarget?.wallet ?? null}
+        holding={adjustTarget?.holding ?? null}
       />
     </div>
   )

@@ -107,7 +107,12 @@ class InvestorProfile(models.Model):
         default=True,
         verbose_name='Использовать базовый портфель'
     )
-    
+
+    has_existing_portfolio = models.BooleanField(
+        default=False,
+        verbose_name='Имел портфель до входа в сервис'
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

@@ -5,6 +5,7 @@ interface SessionState {
   userName: string | null
   isReady: boolean
   hasCompletedOnboarding: boolean
+  hasExistingPortfolio: boolean | null
   
   // Actions
   initSession: () => void
@@ -13,6 +14,7 @@ interface SessionState {
   setUserName: (name: string) => void
   setSessionFromLookup: (sessionId: string, name: string) => void
   startNewUserSession: (name: string) => void
+  setHasExistingPortfolio: (value: boolean) => void
   resetSession: () => void
 }
 
@@ -37,6 +39,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   userName: null,
   isReady: false,
   hasCompletedOnboarding: false,
+  hasExistingPortfolio: null,
   
   /**
    * Инициализация сессии.
@@ -59,12 +62,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Читаем состояние onboarding и имя
     const onboardingCompleted = localStorage.getItem('onboarding_completed') === 'true'
     const userName = localStorage.getItem('user_name')
+    const hasExistingRaw = localStorage.getItem('has_existing_portfolio')
+    const hasExistingPortfolio =
+      hasExistingRaw === null ? null : hasExistingRaw === 'true'
     
     set({ 
       sessionId, 
       userName,
       isReady: true,
-      hasCompletedOnboarding: onboardingCompleted
+      hasCompletedOnboarding: onboardingCompleted,
+      hasExistingPortfolio,
     })
   },
   
@@ -148,14 +155,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       localStorage.setItem('session_id', newSessionId)
       localStorage.setItem('user_name', name)
       localStorage.removeItem('onboarding_completed')
+      localStorage.removeItem('has_existing_portfolio')
       
       set({
         sessionId: newSessionId,
         userName: name,
         hasCompletedOnboarding: false,
+        hasExistingPortfolio: null,
         isReady: true
       })
     }
+  },
+  
+  /**
+   * Установка флага наличия существующего портфеля у пользователя.
+   * Сохраняется в localStorage, чтобы повторный заход в анкету не сбрасывал ответ.
+   */
+  setHasExistingPortfolio: (value: boolean) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('has_existing_portfolio', String(value))
+    }
+    set({ hasExistingPortfolio: value })
   },
   
   /**
@@ -166,12 +186,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       localStorage.removeItem('session_id')
       localStorage.removeItem('user_name')
       localStorage.removeItem('onboarding_completed')
+      localStorage.removeItem('has_existing_portfolio')
     }
     set({ 
       sessionId: null,
       userName: null,
       isReady: false,
-      hasCompletedOnboarding: false 
+      hasCompletedOnboarding: false,
+      hasExistingPortfolio: null,
     })
   },
 }))

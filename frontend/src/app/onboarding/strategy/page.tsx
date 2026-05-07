@@ -52,7 +52,7 @@ export default function OnboardingStrategyPage() {
 
   const handleReady = () => {
     setOnboardingCompleted(true)
-    router.push('/questionnaire')
+    router.push('/onboarding/existing-portfolio')
   }
 
   const handleBack = () => router.push('/onboarding/module')

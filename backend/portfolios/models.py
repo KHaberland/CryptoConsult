@@ -46,7 +46,12 @@ class Portfolio(models.Model):
         default=True,
         verbose_name='Активен'
     )
-    
+
+    is_imported = models.BooleanField(
+        default=False,
+        verbose_name='Импортирован пользователем'
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -110,7 +115,18 @@ class PortfolioAsset(models.Model):
         blank=True,
         verbose_name='Количество единиц'
     )
-    
+
+    is_recommended = models.BooleanField(
+        default=True,
+        verbose_name='Входит в рекомендуемый ТОП-10'
+    )
+
+    purchased_at = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name='Дата покупки'
+    )
+
     class Meta:
         verbose_name = 'Актив портфеля'
         verbose_name_plural = 'Активы портфеля'
@@ -156,6 +172,143 @@ class PortfolioContribution(models.Model):
         return f'{self.amount} ({self.contributed_at})'
 
 
+class PortfolioContributionItem(models.Model):
+    """Детализация взноса по конкретной монете (для режима «по монетам»)."""
+
+    contribution = models.ForeignKey(
+        'PortfolioContribution',
+        on_delete=models.CASCADE,
+        related_name='items',
+        verbose_name='Взнос'
+    )
+
+    symbol = models.CharField(
+        max_length=10,
+        verbose_name='Символ актива'
+    )
+
+    units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Количество единиц'
+    )
+
+    purchase_price = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Цена покупки ($)'
+    )
+
+    value_usd = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        verbose_name='Сумма позиции ($)'
+    )
+
+    class Meta:
+        verbose_name = 'Позиция взноса'
+        verbose_name_plural = 'Позиции взносов'
+
+    def __str__(self):
+        return f'{self.units} {self.symbol} @ ${self.purchase_price}'
+
+
+class PortfolioSwap(models.Model):
+    """Обмен одного актива портфеля на другой (внутренняя операция, без cash-in/out).
+
+    Swap всегда происходит внутри одного кошелька: from_symbol списывается и
+    to_symbol зачисляется на один и тот же ``wallet`` (см. PLAN06 — Агент 12).
+    Поле ``wallet`` оставлено nullable для исторических записей, созданных до
+    появления модели Wallet.
+    """
+
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='swaps',
+        verbose_name='Портфель'
+    )
+
+    wallet = models.ForeignKey(
+        'Wallet',
+        on_delete=models.SET_NULL,
+        related_name='swaps',
+        null=True,
+        blank=True,
+        verbose_name='Кошелёк'
+    )
+
+    from_symbol = models.CharField(
+        max_length=10,
+        verbose_name='Из (символ)'
+    )
+
+    from_units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Из (количество)'
+    )
+
+    from_price = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Из (цена $)'
+    )
+
+    to_symbol = models.CharField(
+        max_length=10,
+        verbose_name='В (символ)'
+    )
+
+    to_units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='В (количество)'
+    )
+
+    to_price = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='В (цена $)'
+    )
+
+    to_units_expected = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        null=True,
+        blank=True,
+        verbose_name='Ожидаемое количество по рынку'
+    )
+
+    fee_usd = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name='Комиссия / разница ($)'
+    )
+
+    note = models.CharField(
+        max_length=200,
+        blank=True,
+        verbose_name='Комментарий'
+    )
+
+    swapped_at = models.DateField(
+        auto_now_add=True,
+        verbose_name='Дата обмена'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Обмен активов'
+        verbose_name_plural = 'Обмены активов'
+        ordering = ['-swapped_at']
+
+    def __str__(self):
+        return f'{self.from_units} {self.from_symbol} → {self.to_units} {self.to_symbol}'
+
+
 class PortfolioWithdrawal(models.Model):
     """Вывод средств из портфеля (не считается просадкой)."""
     
@@ -194,6 +347,266 @@ class PortfolioWithdrawal(models.Model):
     
     def __str__(self):
         return f'{self.amount} ({self.withdrawn_at})'
+
+
+class Wallet(models.Model):
+    """Кошелёк портфеля (биржа, холодный/горячий, банковский счёт и т.д.)."""
+
+    TYPE_EXCHANGE = 'exchange'
+    TYPE_HOT = 'hot'
+    TYPE_COLD = 'cold'
+    TYPE_BANK = 'bank'
+    TYPE_OTHER = 'other'
+
+    TYPE_CHOICES = [
+        (TYPE_EXCHANGE, 'Биржа'),
+        (TYPE_HOT, 'Горячий кошелёк'),
+        (TYPE_COLD, 'Холодный кошелёк'),
+        (TYPE_BANK, 'Банковский счёт'),
+        (TYPE_OTHER, 'Другое'),
+    ]
+
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='wallets',
+        verbose_name='Портфель'
+    )
+
+    name = models.CharField(
+        max_length=100,
+        verbose_name='Название кошелька'
+    )
+
+    type = models.CharField(
+        max_length=20,
+        choices=TYPE_CHOICES,
+        default=TYPE_OTHER,
+        verbose_name='Тип кошелька'
+    )
+
+    is_default = models.BooleanField(
+        default=False,
+        verbose_name='Кошелёк по умолчанию'
+    )
+
+    note = models.CharField(
+        max_length=200,
+        blank=True,
+        default='',
+        verbose_name='Комментарий'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Кошелёк'
+        verbose_name_plural = 'Кошельки'
+        unique_together = ['portfolio', 'name']
+        ordering = ['-is_default', 'name']
+
+    def __str__(self):
+        return f'{self.name} ({self.get_type_display()})'
+
+
+class WalletHolding(models.Model):
+    """Баланс актива на конкретном кошельке (только units, без цены покупки)."""
+
+    wallet = models.ForeignKey(
+        Wallet,
+        on_delete=models.CASCADE,
+        related_name='holdings',
+        verbose_name='Кошелёк'
+    )
+
+    symbol = models.CharField(
+        max_length=10,
+        verbose_name='Символ актива'
+    )
+
+    units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Количество единиц'
+    )
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Баланс на кошельке'
+        verbose_name_plural = 'Балансы на кошельках'
+        unique_together = ['wallet', 'symbol']
+
+    def __str__(self):
+        return f'{self.units} {self.symbol} @ {self.wallet.name}'
+
+
+class WalletTransfer(models.Model):
+    """Перевод актива между кошельками портфеля (внутреннее перемещение)."""
+
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='wallet_transfers',
+        verbose_name='Портфель'
+    )
+
+    from_wallet = models.ForeignKey(
+        Wallet,
+        on_delete=models.CASCADE,
+        related_name='transfers_out',
+        verbose_name='Откуда (кошелёк)'
+    )
+
+    to_wallet = models.ForeignKey(
+        Wallet,
+        on_delete=models.CASCADE,
+        related_name='transfers_in',
+        verbose_name='Куда (кошелёк)'
+    )
+
+    symbol = models.CharField(
+        max_length=10,
+        verbose_name='Символ актива'
+    )
+
+    from_units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Списано (количество)'
+    )
+
+    to_units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Зачислено (количество)'
+    )
+
+    fee_units = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        default=0,
+        verbose_name='Комиссия (в единицах актива)'
+    )
+
+    fee_usd = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name='Комиссия ($)'
+    )
+
+    occurred_on = models.DateField(
+        verbose_name='Дата перевода'
+    )
+
+    note = models.CharField(
+        max_length=200,
+        blank=True,
+        default='',
+        verbose_name='Комментарий'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Перевод между кошельками'
+        verbose_name_plural = 'Переводы между кошельками'
+        ordering = ['-occurred_on', '-created_at']
+        indexes = [
+            models.Index(fields=['portfolio', 'occurred_on']),
+        ]
+
+    def __str__(self):
+        return (
+            f'{self.from_units} {self.symbol}: '
+            f'{self.from_wallet.name} → {self.to_wallet.name} ({self.occurred_on})'
+        )
+
+
+class HoldingAdjustment(models.Model):
+    """Ручная корректировка баланса WalletHolding (комиссии сети, сверка, ошибки ввода и т.д.)."""
+
+    REASON_NETWORK_FEE = 'network_fee'
+    REASON_EXCHANGE_FEE = 'exchange_fee'
+    REASON_RECONCILIATION = 'reconciliation'
+    REASON_INPUT_ERROR = 'input_error'
+    REASON_OTHER = 'other'
+
+    REASON_CHOICES = [
+        (REASON_NETWORK_FEE, 'Комиссия сети'),
+        (REASON_EXCHANGE_FEE, 'Комиссия биржи'),
+        (REASON_RECONCILIATION, 'Сверка баланса'),
+        (REASON_INPUT_ERROR, 'Исправление ошибки ввода'),
+        (REASON_OTHER, 'Другое'),
+    ]
+
+    holding = models.ForeignKey(
+        WalletHolding,
+        on_delete=models.CASCADE,
+        related_name='adjustments',
+        verbose_name='Баланс на кошельке'
+    )
+
+    units_before = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Баланс до (количество)'
+    )
+
+    units_after = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Баланс после (количество)'
+    )
+
+    delta = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        verbose_name='Изменение (units_after - units_before)'
+    )
+
+    value_delta_usd = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name='Изменение стоимости ($)'
+    )
+
+    reason = models.CharField(
+        max_length=20,
+        choices=REASON_CHOICES,
+        default=REASON_OTHER,
+        verbose_name='Причина'
+    )
+
+    note = models.CharField(
+        max_length=200,
+        blank=True,
+        default='',
+        verbose_name='Комментарий'
+    )
+
+    occurred_on = models.DateField(
+        verbose_name='Дата корректировки'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Корректировка баланса'
+        verbose_name_plural = 'Корректировки балансов'
+        ordering = ['-occurred_on', '-created_at']
+        indexes = [
+            models.Index(fields=['holding', 'occurred_on']),
+        ]
+
+    def __str__(self):
+        return (
+            f'{self.holding.symbol} @ {self.holding.wallet.name}: '
+            f'{self.units_before} → {self.units_after} ({self.get_reason_display()})'
+        )
 
 
 # Базовый портфель по умолчанию

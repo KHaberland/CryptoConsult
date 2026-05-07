@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useSessionStore } from '@/store/sessionStore'
 import { usePortfolioStore } from '@/store/portfolioStore'
 import { Button } from '@/components/ui/Button'
@@ -361,7 +361,9 @@ const QUESTIONS = [
 
 export default function QuestionnairePage() {
   const router = useRouter()
-  const { initSession, isReady, hasCompletedOnboarding, userName } = useSessionStore()
+  const searchParams = useSearchParams()
+  const isImportMode = searchParams?.get('mode') === 'import'
+  const { initSession, isReady, hasCompletedOnboarding, userName, setHasExistingPortfolio } = useSessionStore()
   const { createProfile, createPortfolio, hasProfile, fetchProfile, isLoading, error, clearError } = usePortfolioStore()
   
   const [currentStep, setCurrentStep] = useState(0)
@@ -445,10 +447,22 @@ export default function QuestionnairePage() {
     }
   }, [hasProfile, router])
   
+  // В режиме импорта пропускаем нерелевантные шаги: DCA-стратегия, базовый
+  // портфель и анализ Биткойна (он показывается на отдельной странице).
+  const HIDDEN_IN_IMPORT = new Set([
+    'use_dca',
+    'dca_parts',
+    'use_default_portfolio',
+    'market_analysis',
+  ])
+
   // Фильтруем вопросы по условиям
-  const visibleQuestions = QUESTIONS.filter(
-    (q) => !q.condition || q.condition(answers)
-  )
+  const visibleQuestions = QUESTIONS.filter((q) => {
+    if (isImportMode && HIDDEN_IN_IMPORT.has(q.id)) {
+      return false
+    }
+    return !q.condition || q.condition(answers)
+  })
   
   const currentQuestion = visibleQuestions[currentStep]
   const progress = ((currentStep + 1) / visibleQuestions.length) * 100
@@ -551,6 +565,27 @@ export default function QuestionnairePage() {
       const submitLimits = getLimits(answers.experience_level ?? 'beginner')
       const isBeginnerSubmit = answers.experience_level === 'beginner'
       const isSomeSubmit = answers.experience_level === 'some'
+
+      // В режиме импорта DCA и базовый портфель не применимы:
+      // создаём только профиль с has_existing_portfolio=true и редиректим на импорт.
+      if (isImportMode) {
+        await createProfile({
+          name: answers.name.trim(),
+          investment_horizon: Math.min(answers.investment_horizon ?? 3, submitLimits.maxHorizon),
+          investment_amount: Math.min(answers.investment_amount ?? 10000, submitLimits.maxAmount),
+          max_drawdown: submitLimits.maxDrawdown != null ? Math.min(answers.max_drawdown ?? 30, submitLimits.maxDrawdown) : answers.max_drawdown,
+          needs_liquidity: isBeginnerSubmit || isSomeSubmit ? true : (answers.needs_liquidity ?? true),
+          experience_level: answers.experience_level,
+          use_dca: false,
+          dca_parts: null,
+          use_default_portfolio: false,
+          has_existing_portfolio: true,
+        })
+        setHasExistingPortfolio(true)
+        router.push('/portfolio/import')
+        return
+      }
+
       await createProfile({
         name: answers.name.trim(),
         investment_horizon: Math.min(answers.investment_horizon ?? 3, submitLimits.maxHorizon),

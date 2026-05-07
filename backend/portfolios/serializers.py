@@ -1,5 +1,15 @@
+from decimal import Decimal, InvalidOperation
+
 from rest_framework import serializers
-from .models import Portfolio, PortfolioAsset, PortfolioContribution, DEFAULT_PORTFOLIO_ASSETS
+from .models import (
+    Portfolio,
+    PortfolioAsset,
+    PortfolioContribution,
+    DEFAULT_PORTFOLIO_ASSETS,
+    HoldingAdjustment,
+    Wallet,
+    WalletHolding,
+)
 from .services import PriceService
 
 
@@ -16,6 +26,9 @@ class PortfolioAssetSerializer(serializers.ModelSerializer):
             'percentage',
             'initial_price',
             'initial_value',
+            'units',
+            'is_recommended',
+            'purchased_at',
         )
         read_only_fields = ('id', 'initial_value')
 
@@ -35,6 +48,7 @@ class PortfolioSerializer(serializers.ModelSerializer):
             'target_years',
             'target_date',
             'is_active',
+            'is_imported',
             'assets',
             'created_at',
             'updated_at',
@@ -148,6 +162,290 @@ class PortfolioCreateSerializer(serializers.ModelSerializer):
             )
 
         return portfolio
+
+
+class ContributionItemInputSerializer(serializers.Serializer):
+    """Одна позиция взноса в режиме «по монетам»."""
+
+    symbol = serializers.CharField(max_length=10)
+    units = serializers.FloatField(min_value=0.0)
+    purchase_price = serializers.FloatField(
+        required=False, allow_null=True, min_value=0.0
+    )
+    purchased_at = serializers.DateField(required=False, allow_null=True)
+
+    def validate_symbol(self, value):
+        sym = (value or '').upper().strip()
+        if not sym:
+            raise serializers.ValidationError('Не указан символ актива.')
+        if not PriceService.is_symbol_supported(sym):
+            raise serializers.ValidationError(
+                f"Символ '{sym}' не поддерживается."
+            )
+        return sym
+
+    def validate_units(self, value):
+        if value <= 0:
+            raise serializers.ValidationError(
+                'Количество должно быть больше нуля.'
+            )
+        return value
+
+
+class ContributeByUnitsSerializer(serializers.Serializer):
+    """Взнос в портфель в режиме «по монетам»: список позиций.
+
+    Поле ``wallet_id`` — опциональное. Если не задано, используется default
+    Wallet портфеля (см. WalletLedger.get_default_wallet).
+    """
+
+    items = ContributionItemInputSerializer(many=True)
+    wallet_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                'Укажите хотя бы одну позицию.'
+            )
+        for it in value:
+            if it.get('units', 0) <= 0:
+                raise serializers.ValidationError(
+                    'Количество должно быть больше нуля.'
+                )
+        return value
+
+
+class SwapInputSerializer(serializers.Serializer):
+    """Вход для исполнения обмена (swap) активов внутри портфеля.
+
+    Поле ``wallet_id`` — опциональное. Если не задано, используется default
+    Wallet портфеля (см. WalletLedger.get_default_wallet). Swap всегда
+    происходит внутри одного кошелька (см. PLAN06 — Агент 12).
+    """
+
+    from_symbol = serializers.CharField(max_length=10)
+    from_units = serializers.FloatField(min_value=0.0)
+    to_symbol = serializers.CharField(max_length=10)
+    to_units = serializers.FloatField(min_value=0.0)
+    note = serializers.CharField(
+        max_length=200, required=False, allow_blank=True
+    )
+    wallet_id = serializers.IntegerField(
+        required=False, allow_null=True, min_value=1
+    )
+
+    def validate(self, attrs):
+        attrs['from_symbol'] = (attrs.get('from_symbol') or '').upper().strip()
+        attrs['to_symbol'] = (attrs.get('to_symbol') or '').upper().strip()
+
+        if not attrs['from_symbol'] or not attrs['to_symbol']:
+            raise serializers.ValidationError('Не указан один из символов.')
+
+        if attrs['from_symbol'] == attrs['to_symbol']:
+            raise serializers.ValidationError(
+                'Символы «Из» и «В» не могут совпадать.'
+            )
+
+        if attrs['from_units'] <= 0 or attrs['to_units'] <= 0:
+            raise serializers.ValidationError(
+                'Количество должно быть больше нуля.'
+            )
+
+        for sym in (attrs['from_symbol'], attrs['to_symbol']):
+            if not PriceService.is_symbol_supported(sym):
+                raise serializers.ValidationError(
+                    f"Символ '{sym}' не поддерживается."
+                )
+
+        return attrs
+
+
+class WalletTransferInputSerializer(serializers.Serializer):
+    """Вход для перевода актива между кошельками внутри портфеля."""
+
+    from_wallet_id = serializers.IntegerField(min_value=1)
+    to_wallet_id = serializers.IntegerField(min_value=1)
+    symbol = serializers.CharField(max_length=10)
+    from_units = serializers.DecimalField(max_digits=20, decimal_places=8)
+    to_units = serializers.DecimalField(max_digits=20, decimal_places=8)
+
+    def validate_symbol(self, value):
+        sym = (value or '').upper().strip()
+        if not sym:
+            raise serializers.ValidationError('Не указан символ актива.')
+        if not PriceService.is_symbol_supported(sym):
+            raise serializers.ValidationError(
+                f"Символ '{sym}' не поддерживается."
+            )
+        return sym
+
+    def validate(self, attrs):
+        from_wallet_id = attrs.get('from_wallet_id')
+        to_wallet_id = attrs.get('to_wallet_id')
+        from_units = attrs.get('from_units')
+        to_units = attrs.get('to_units')
+
+        if from_wallet_id == to_wallet_id:
+            raise serializers.ValidationError(
+                'Кошелёк-источник и кошелёк-получатель не могут совпадать.'
+            )
+
+        if from_units is None or to_units is None:
+            raise serializers.ValidationError(
+                'Не указано количество единиц.'
+            )
+
+        if from_units <= 0 or to_units <= 0:
+            raise serializers.ValidationError(
+                'Количество должно быть больше нуля.'
+            )
+
+        if to_units > from_units:
+            raise serializers.ValidationError(
+                'Количество к получению не может превышать количество к отправке.'
+            )
+
+        return attrs
+
+
+class HoldingAdjustInputSerializer(serializers.Serializer):
+    """Вход для ручной коррекции баланса WalletHolding.
+
+    Тело запроса задаёт ЦЕЛЕВОЕ значение баланса (`units_after`).
+    Дельта вычисляется во view как `units_after - units_before`.
+    Net Invested при коррекции НЕ меняется — мы только пересчитываем
+    `PortfolioAsset.units` через `WalletLedger.sync_aggregate`.
+    """
+
+    units_after = serializers.DecimalField(
+        max_digits=20, decimal_places=8, min_value=0
+    )
+    reason = serializers.ChoiceField(
+        choices=HoldingAdjustment.REASON_CHOICES,
+        required=False,
+        default=HoldingAdjustment.REASON_OTHER,
+    )
+    note = serializers.CharField(
+        max_length=200, required=False, allow_blank=True, default=''
+    )
+    occurred_on = serializers.DateField(required=False)
+
+
+def _holding_value_usd(symbol, units, prices):
+    """Стоимость holding'а в USD по словарю цен.
+
+    Возвращает float, округлённый до 2 знаков, либо None, если цены нет
+    или её невозможно привести к числу.
+    """
+    if not prices:
+        return None
+    price = prices.get(symbol)
+    if price is None:
+        return None
+    try:
+        value = Decimal(str(price)) * (units or Decimal('0'))
+    except (InvalidOperation, TypeError):
+        return None
+    return float(round(value, 2))
+
+
+class WalletHoldingSerializer(serializers.ModelSerializer):
+    """Сериализатор баланса актива на кошельке (read-only представление)."""
+
+    wallet_id = serializers.IntegerField(source='wallet.id', read_only=True)
+    value_usd = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WalletHolding
+        fields = ('id', 'wallet_id', 'symbol', 'units', 'value_usd', 'updated_at')
+        read_only_fields = fields
+
+    def get_value_usd(self, obj):
+        prices = self.context.get('prices') or {}
+        return _holding_value_usd(obj.symbol, obj.units, prices)
+
+
+class WalletSerializer(serializers.ModelSerializer):
+    """Сериализатор кошелька (для list/retrieve)."""
+
+    portfolio_id = serializers.IntegerField(source='portfolio.id', read_only=True)
+    holdings = WalletHoldingSerializer(many=True, read_only=True)
+    total_value_usd = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Wallet
+        fields = (
+            'id',
+            'portfolio_id',
+            'name',
+            'type',
+            'is_default',
+            'note',
+            'created_at',
+            'updated_at',
+            'holdings',
+            'total_value_usd',
+        )
+        read_only_fields = (
+            'id',
+            'portfolio_id',
+            'created_at',
+            'updated_at',
+            'holdings',
+            'total_value_usd',
+        )
+
+    def get_total_value_usd(self, obj):
+        prices = self.context.get('prices') or {}
+        total = Decimal('0')
+        for holding in obj.holdings.all():
+            value = _holding_value_usd(holding.symbol, holding.units, prices)
+            if value is not None:
+                total += Decimal(str(value))
+        return float(round(total, 2))
+
+
+class WalletCreateSerializer(serializers.ModelSerializer):
+    """Сериализатор для создания кошелька в активном портфеле."""
+
+    class Meta:
+        model = Wallet
+        fields = ('name', 'type', 'note', 'is_default')
+        extra_kwargs = {
+            'note': {'required': False, 'allow_blank': True, 'default': ''},
+            'is_default': {'required': False, 'default': False},
+            'type': {'required': False, 'default': Wallet.TYPE_OTHER},
+        }
+
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('Название кошелька не может быть пустым.')
+        if len(name) > 100:
+            raise serializers.ValidationError('Название слишком длинное (максимум 100 символов).')
+        return name
+
+
+class WalletUpdateSerializer(serializers.ModelSerializer):
+    """Сериализатор для PATCH кошелька (имя/тип/комментарий/флаг default)."""
+
+    class Meta:
+        model = Wallet
+        fields = ('name', 'type', 'note', 'is_default')
+        extra_kwargs = {
+            'name': {'required': False},
+            'type': {'required': False},
+            'note': {'required': False, 'allow_blank': True},
+            'is_default': {'required': False},
+        }
+
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('Название кошелька не может быть пустым.')
+        if len(name) > 100:
+            raise serializers.ValidationError('Название слишком длинное (максимум 100 символов).')
+        return name
 
 
 class PortfolioValueSerializer(serializers.Serializer):

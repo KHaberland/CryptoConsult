@@ -66,6 +66,7 @@ class InvestorProfileSerializer(serializers.ModelSerializer):
             'use_dca',
             'dca_parts',
             'use_default_portfolio',
+            'has_existing_portfolio',
             'created_at',
             'updated_at',
         )
