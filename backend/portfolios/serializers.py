@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from rest_framework import serializers
@@ -6,6 +7,7 @@ from .models import (
     PortfolioAsset,
     PortfolioContribution,
     DEFAULT_PORTFOLIO_ASSETS,
+    FiatCashFlow,
     HoldingAdjustment,
     Wallet,
     WalletHolding,
@@ -446,6 +448,83 @@ class WalletUpdateSerializer(serializers.ModelSerializer):
         if len(name) > 100:
             raise serializers.ValidationError('Название слишком длинное (максимум 100 символов).')
         return name
+
+
+class FiatCashFlowSerializer(serializers.ModelSerializer):
+    """Сериализатор фиатного движения средств по портфелю (PLAN11).
+
+    Создание/чтение/частичное обновление :class:`FiatCashFlow`.
+
+    Read-only поля:
+        * ``id``, ``created_at`` — служебные.
+        * ``fx_rate_to_base`` — проставляется во view через ``_fx_rate``.
+        * ``amount_in_base`` — расчётное поле модели (``amount × fx_rate``).
+
+    Валидация:
+        * ``kind`` ∈ {deposit, withdrawal};
+        * ``currency`` ∈ {USD, EUR};
+        * ``amount > 0``;
+        * ``occurred_on`` <= сегодня; если не указана — подставляется ``today``.
+    """
+
+    amount_in_base = serializers.FloatField(read_only=True)
+    occurred_on = serializers.DateField(required=False)
+    note = serializers.CharField(
+        max_length=200, required=False, allow_blank=True, default=''
+    )
+
+    class Meta:
+        model = FiatCashFlow
+        fields = (
+            'id',
+            'kind',
+            'amount',
+            'currency',
+            'fx_rate_to_base',
+            'amount_in_base',
+            'occurred_on',
+            'note',
+            'created_at',
+        )
+        read_only_fields = (
+            'id',
+            'fx_rate_to_base',
+            'amount_in_base',
+            'created_at',
+        )
+
+    def validate_amount(self, value):
+        if value is None or value <= 0:
+            raise serializers.ValidationError('Сумма должна быть больше нуля.')
+        return value
+
+    def validate_kind(self, value):
+        valid = (FiatCashFlow.KIND_DEPOSIT, FiatCashFlow.KIND_WITHDRAWAL)
+        if value not in valid:
+            raise serializers.ValidationError(
+                f"Допустимые значения kind: {', '.join(valid)}."
+            )
+        return value
+
+    def validate_currency(self, value):
+        valid = (Portfolio.CURRENCY_USD, Portfolio.CURRENCY_EUR)
+        if value not in valid:
+            raise serializers.ValidationError(
+                f"Допустимые значения currency: {', '.join(valid)}."
+            )
+        return value
+
+    def validate_occurred_on(self, value):
+        if value and value > date.today():
+            raise serializers.ValidationError(
+                'Дата операции не может быть в будущем.'
+            )
+        return value
+
+    def validate(self, attrs):
+        if not attrs.get('occurred_on'):
+            attrs['occurred_on'] = date.today()
+        return attrs
 
 
 class PortfolioValueSerializer(serializers.Serializer):

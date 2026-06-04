@@ -1,0 +1,30 @@
+﻿== ╨º╨╕╤ü╤é╨║╨░ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å #27 ╨┐╨╛ ╨▓╨░╤Ç╨╕╨░╨╜╤é╤â A (DRY-RUN) ==
+
+================================================================================
+ SNAPSHOT [BEFORE]
+================================================================================
+Portfolio: #27 '╨£╨╛╨╣ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤î (╨╕╨╝╨┐╨╛╤Ç╤é)'
+  initial_amount  = 3749.73
+  contributions   = 5 ╤ê╤é.  ╬ú=2494.55
+     id=6  amount=14.47  date=2026-04-29
+     id=7  amount=1.00  date=2026-04-29
+     id=8  amount=0.67  date=2026-05-05
+     id=9  amount=2271.89  date=2026-05-07
+     id=10  amount=206.52  date=2026-05-07
+  total_invested  = 6244.28
+  PortfolioAsset.units / ╬ú WalletHolding.units:
+      BNB  asset.units=0.00438100  ╬úholdings=0.00438100000000000  OK
+      BTC  asset.units=0.03343415  ╬úholdings=0.0334341500000000  OK
+      ETH  asset.units=0.23814427  ╬úholdings=0.238144270000000  OK
+      SOL  asset.units=5.11774100  ╬úholdings=5.11774100000000  OK
+     USDC  asset.units=379.69680000  ╬úholdings=379.696800000000  OK
+  invariant: OK
+  legacy P&L:  invested=$6,244.28  current=$3,907.25  P&L=$-2,337.03  (-37.43%)
+  fiat   P&L:  cash_in=$3,044.00  current=$3,907.25  P&L=$+863.25  (+28.36%)
+
+╨ª╨╡╨╗╨╡╨▓╨░╤Å ╨╖╨░╨┐╨╕╤ü╤î:
+  PortfolioContribution id=9  amount=2271.89  date=2026-05-07
+     item id=6  BTC units=0.02803418 price=81040.00000000 value=$2271.89
+
+DRY-RUN: ╤Ç╨╡╨░╨╗╤î╨╜╤ï╤à ╨╕╨╖╨╝╨╡╨╜╨╡╨╜╨╕╨╣ ╨╜╨╡ ╨▒╤â╨┤╨╡╤é. ╨º╤é╨╛╨▒╤ï ╨▓╤ï╨┐╨╛╨╗╨╜╨╕╤é╤î:
+   python _fix_p27_variantA.py --confirm

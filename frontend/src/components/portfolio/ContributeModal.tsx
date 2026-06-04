@@ -8,6 +8,7 @@ import { CheckCircle, DollarSign, Coins, Plus, Trash2 } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import { portfolioApi, type Wallet } from '@/services/api'
 import { WalletSelector } from '@/components/portfolio/WalletSelector'
+import { parseApiError, type MirrorPairConflictInfo } from '@/lib/api-errors'
 
 type Mode = 'usd' | 'units'
 
@@ -95,6 +96,8 @@ export function ContributeModal({
   const [isLoading, setIsLoading] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [mirrorConflict, setMirrorConflict] =
+    useState<MirrorPairConflictInfo | null>(null)
 
   // Сброс формы при открытии модалки
   useEffect(() => {
@@ -106,6 +109,7 @@ export function ContributeModal({
       ])
       setSelectedWalletId(defaultWalletId)
       setError(null)
+      setMirrorConflict(null)
       setShowSuccess(false)
     }
   }, [isOpen, suggestedAmount, defaultWalletId])
@@ -173,14 +177,15 @@ export function ContributeModal({
 
     setIsLoading(true)
     setError(null)
+    setMirrorConflict(null)
 
     try {
       await onConfirm(numAmount)
       setShowSuccess(true)
-    } catch (err: any) {
-      setError(
-        err?.response?.data?.detail || err?.message || 'Ошибка при внесении взноса'
-      )
+    } catch (err: unknown) {
+      const parsed = parseApiError(err, 'Ошибка при внесении взноса')
+      setError(parsed.message)
+      setMirrorConflict(parsed.mirrorConflict)
     } finally {
       setIsLoading(false)
     }
@@ -224,14 +229,15 @@ export function ContributeModal({
 
     setIsLoading(true)
     setError(null)
+    setMirrorConflict(null)
 
     try {
       await onConfirmUnits(items, selectedWalletId)
       setShowSuccess(true)
-    } catch (err: any) {
-      setError(
-        err?.response?.data?.detail || err?.message || 'Ошибка при покупке монет'
-      )
+    } catch (err: unknown) {
+      const parsed = parseApiError(err, 'Ошибка при покупке монет')
+      setError(parsed.message)
+      setMirrorConflict(parsed.mirrorConflict)
     } finally {
       setIsLoading(false)
     }
@@ -568,7 +574,21 @@ export function ContributeModal({
           </>
         )}
 
-        {error && <Alert variant="error">{error}</Alert>}
+        {mirrorConflict ? (
+          <Alert
+            variant="warning"
+            title="Похоже, это та же операция, что и корректировка"
+          >
+            <p className="mb-1">{error}</p>
+            <p className="text-xs opacity-80">
+              {mirrorConflict.kind === 'contribution' ? 'Контрибьюшн' : 'Корректировка'}{' '}
+              #{mirrorConflict.id} от {mirrorConflict.date} по {mirrorConflict.symbol}{' '}
+              на ~{formatCurrency(mirrorConflict.value_usd)}.
+            </p>
+          </Alert>
+        ) : (
+          error && <Alert variant="error">{error}</Alert>
+        )}
       </div>
       <ModalFooter>
         <Button variant="secondary" onClick={handleClose}>

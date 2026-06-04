@@ -1,0 +1,104 @@
+﻿Portfolio #27: '╨£╨╛╨╣ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤î (╨╕╨╝╨┐╨╛╤Ç╤é)'
+  initial_amount = 3749.73
+  base_currency  = USD
+  is_imported    = True
+  start_date     = 2026-04-27
+
+=== FiatCashFlow (1 ╤ê╤é.) ===
+  id=3     deposit  3044.00 USD  fx=1.000000  in_base=3044.00000000  date=2026-05-18  note='╨┐╨╛╨┐╨╛╨╗╨╜╨╡╨╜╨╕╨╡ ╤ü╤ç╨╡╤é╨░ ╤ü ╨▒╨░╨╜╨║╨░'
+  ╬ú deposits      = 3,044.00 USD
+  ╬ú withdrawals   = 0.00 USD
+  net_cash_in     = 3,044.00 USD
+
+=== PortfolioContribution (5 ╤ê╤é.) ===
+  id=6  amount=14.47  date=2026-04-29
+     USDC: units=14.47425560  price=0.99980200  value=$14.47
+  id=7  amount=1.00  date=2026-04-29
+     USDC: units=1.00000000  price=0.99980200  value=$1.00
+  id=8  amount=0.67  date=2026-05-05
+     ETH: units=0.00028340  price=2377.64000000  value=$0.67
+  id=9  amount=2271.89  date=2026-05-07
+     BTC: units=0.02803418  price=81040.00000000  value=$2271.89
+  id=10  amount=206.52  date=2026-05-07
+     USDC: units=206.57190000  price=0.99973600  value=$206.52
+  ╬ú contributions = 2,494.55
+  initial_amount + ╬ú contributions = 6,244.28
+
+=== ╨É╨║╤é╨╕╨▓╤ï ╨╕ ╤é╨╡╨║╤â╤ë╨░╤Å ╤ü╤é╨╛╨╕╨╝╨╛╤ü╤é╤î (units ├ù spot, USD) ===
+    BTC  units=0.03343415  init_price=79168.98337955  cur_price=$76,947.00  value=$2,572.66  cost_basis(units*init)=$2,646.95  pct=66.15%
+    ETH  units=0.23814427  init_price=2349.78041357  cur_price=$2,117.43  value=$504.25  cost_basis(units*init)=$559.59  pct=13.54%
+    SOL  units=5.11774100  init_price=85.36000000  cur_price=$84.31  value=$431.48  cost_basis(units*init)=$436.85  pct=11.05%
+    BNB  units=0.00438100  init_price=626.49000000  cur_price=$641.89  value=$2.81  cost_basis(units*init)=$2.74  pct=0.00%
+   USDC  units=379.69680000  init_price=0.99977891  cur_price=$1.00  value=$379.57  cost_basis(units*init)=$379.61  pct=9.26%
+  ╬ú current_value (units ├ù spot)  = $3,890.77
+
+=== PortfolioAnalyzer ===
+  get_current_value():
+     initial_value  = $6,244.28
+     current_value  = $3,890.77
+     profit_loss    = $-2,353.51
+     profit_loss_%  = -37.69%
+
+  get_fiat_pnl('USD'):
+                   currency = USD
+              cash_in_total = 3044.0
+             cash_out_total = 0.0
+                net_cash_in = 3044.0
+              current_value = 3891.2881373271002
+                profit_loss = 847.2881373271002
+        profit_loss_percent = 27.834695707197778
+                 no_cash_in = False
+                   fx_stale = False
+
+=== HoldingAdjustment (10 ╤ê╤é.) ===
+  2026-05-07    BTC@w1  0.02803418 ΓåÆ 0E-8  ╬ö=-0.02803418  value_╬ö=$-2271.89  reason=other  note=''
+  2026-05-18    BTC@w1  0.02803418 ΓåÆ 0.02803515  ╬ö=+9.7E-7  value_╬ö=$+0.07  reason=other  note=''
+  2026-05-18   USDC@w1  379.31546161 ΓåÆ 379.69680000  ╬ö=+0.38133839  value_╬ö=$+0.38  reason=other  note=''
+  2026-05-18    ETH@w1  0.10102468 ΓåÆ 0.10106727  ╬ö=+0.00004259  value_╬ö=$+0.09  reason=other  note=''
+  2026-05-18    SOL@w2  5.10525600 ΓåÆ 5.11774100  ╬ö=+0.01248500  value_╬ö=$+1.05  reason=other  note=''
+  2026-05-18    BTC@w2  0.00539870 ΓåÆ 0.00539900  ╬ö=+3.0E-7  value_╬ö=$+0.02  reason=other  note=''
+  2026-05-18    ETH@w2  0.13706940 ΓåÆ 0.13707700  ╬ö=+0.00000760  value_╬ö=$+0.02  reason=other  note=''
+  2026-05-18    BNB@w2  0.00010800 ΓåÆ 0.00438100  ╬ö=+0.00427300  value_╬ö=$+2.73  reason=other  note=''
+  2026-05-19   USDC@w4  0E-8 ΓåÆ 100.00000000  ╬ö=+100.00000000  value_╬ö=$+99.97  reason=other  note=''
+  2026-05-19   USDC@w4  100.00000000 ΓåÆ 0E-8  ╬ö=-100.00000000  value_╬ö=$-99.98  reason=other  note=''
+  ╬ú value_delta_usd = $-2267.54
+
+=== WalletTransfer (7 ╤ê╤é.) ===
+  2026-05-07  BTC: 0.02803418 (w4) ΓåÆ 0.02803418 (w1)  fee=0E-8 (0.00$)
+  2026-05-07  USDC: 379.31546161 (w4) ΓåÆ 379.31546161 (w1)  fee=0E-8 (0.00$)
+  2026-05-07  ETH: 0.10102468 (w4) ΓåÆ 0.10102468 (w1)  fee=0E-8 (0.00$)
+  2026-05-07  SOL: 5.10525600 (w4) ΓåÆ 5.10525600 (w2)  fee=0E-8 (0.00$)
+  2026-05-07  BTC: 0.00539870 (w4) ΓåÆ 0.00539870 (w2)  fee=0E-8 (0.00$)
+  2026-05-07  ETH: 0.13706940 (w4) ΓåÆ 0.13706940 (w2)  fee=0E-8 (0.00$)
+  2026-05-07  BNB: 0.00010800 (w4) ΓåÆ 0.00010800 (w2)  fee=0E-8 (0.00$)
+
+=== PortfolioSwap (4 ╤ê╤é.) ===
+  2026-04-27  100.00000000 USDC@$0.99982100 ΓåÆ 0.04322522 ETH@$2313.05000000  fee=$0.00  wallet=None
+  2026-04-28  100.00000000 USDC@$0.99986900 ΓåÆ 0.00131029 BTC@$76107.00000000  fee=$0.26  wallet=None
+  2026-04-29  50.00000000 USDC@$0.99978600 ΓåÆ 0.02152846 ETH@$2322.01000000  fee=$0.00  wallet=None
+  2026-05-05  0.52456100 BNB@$627.60000000 ΓåÆ 0.13707700 ETH@$2374.20000000  fee=$3.77  wallet=None
+
+=== ╨Ü╨╛╤ê╨╡╨╗╤î╨║╨╕ ===
+  Wallet #4  '╨₧╨▒╤ë╨╕╨╣ ╨║╨╛╤ê╨╡╨╗╤æ╨║'  default=True
+     BTC: units=0E-8
+     ETH: units=0E-8
+     SOL: units=0E-8
+     BNB: units=0E-8
+     USDC: units=0E-8
+  Wallet #1  'Binance'  default=False
+     BTC: units=0.02803515
+     USDC: units=379.69680000
+     ETH: units=0.10106727
+  Wallet #3  'Kucoin'  default=False
+  Wallet #2  'Trust Wallet'  default=False
+     SOL: units=5.11774100
+     BTC: units=0.00539900
+     ETH: units=0.13707700
+     BNB: units=0.00438100
+
+=== ╬ú WalletHolding.units vs PortfolioAsset.units ===
+  BTC: ╬úholdings=0.03343415  PortfolioAsset.units=0.03343415  OK
+  ETH: ╬úholdings=0.23814427  PortfolioAsset.units=0.23814427  OK
+  SOL: ╬úholdings=5.11774100  PortfolioAsset.units=5.11774100  OK
+  BNB: ╬úholdings=0.00438100  PortfolioAsset.units=0.00438100  OK
+  USDC: ╬úholdings=379.69680000  PortfolioAsset.units=379.69680000  OK

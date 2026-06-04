@@ -7,13 +7,15 @@ import logging
 import math
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
+import requests
 from django.conf import settings
+from django.core.cache import cache as django_cache
 from django.db import transaction
 from openai import OpenAI
 
-from portfolios.models import Portfolio
+from portfolios.models import Portfolio, FiatCashFlow
 from portfolios.services import PriceService
 from users.models import InvestorProfile
 from .models import ChatMessage
@@ -27,6 +29,103 @@ def _fmt_inst_news(inst_dict: dict) -> str:
     if not headlines:
         return "нет данных"
     return "; ".join((h.get("title") or "")[:80] for h in headlines[:5])
+
+
+_FX_CACHE_KEY_USD_EUR = 'fx_rate_usd_eur'
+_FX_CACHE_TTL_SECONDS = 60 * 60  # 1 час
+
+
+def _fx_rate(from_cur: str, to_cur: str) -> Tuple[Decimal, bool]:
+    """
+    Курс конвертации `from_cur → to_cur` для подсистемы FiatCashFlow (PLAN11).
+
+    Поддерживаются только 'USD' и 'EUR'. Никакой истории курсов не хранит —
+    это снимок «сейчас», результат кэшируется в Django-cache на 1 час.
+
+    Args:
+        from_cur: исходная валюта ('USD' | 'EUR').
+        to_cur: целевая валюта ('USD' | 'EUR').
+
+    Returns:
+        Кортеж ``(rate, stale)``:
+        * ``rate`` — :class:`Decimal`, курс умножения суммы в ``from_cur``
+          на получение суммы в ``to_cur``.
+        * ``stale=True`` — внешний источник недоступен и rate возвращён как
+          ``Decimal('1')`` (либо валюта неподдерживаемая). Вызывающий код
+          должен пометить такие данные как «курс временно недоступен».
+    """
+    f = (from_cur or '').upper()
+    t = (to_cur or '').upper()
+
+    if f not in ('USD', 'EUR') or t not in ('USD', 'EUR'):
+        logger.warning(
+            "_fx_rate: неподдерживаемая пара %s→%s, возвращаю (1, stale=True)",
+            from_cur, to_cur,
+        )
+        return Decimal('1'), True
+
+    if f == t:
+        return Decimal('1'), False
+
+    usd_eur = django_cache.get(_FX_CACHE_KEY_USD_EUR)
+    if usd_eur is None:
+        try:
+            response = requests.get(
+                'https://api.exchangerate.host/latest',
+                params={'base': 'USD', 'symbols': 'EUR'},
+                timeout=5,
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            rate_value = (payload.get('rates') or {}).get('EUR')
+            if rate_value is None:
+                raise ValueError(
+                    f"exchangerate.host не вернул курс EUR: {payload!r}"
+                )
+            usd_eur = Decimal(str(rate_value))
+            if usd_eur <= 0:
+                raise ValueError(f"некорректный курс USD→EUR: {usd_eur}")
+            django_cache.set(_FX_CACHE_KEY_USD_EUR, usd_eur, _FX_CACHE_TTL_SECONDS)
+            logger.info("_fx_rate: получен USD→EUR=%s", usd_eur)
+        except Exception as e:  # noqa: BLE001 — сторонний HTTP/JSON
+            logger.warning("_fx_rate: USD→EUR недоступен (%s), отдаю 1.0 stale", e)
+            return Decimal('1'), True
+    elif not isinstance(usd_eur, Decimal):
+        try:
+            usd_eur = Decimal(str(usd_eur))
+        except Exception:
+            return Decimal('1'), True
+
+    if usd_eur <= 0:
+        return Decimal('1'), True
+
+    if f == 'USD' and t == 'EUR':
+        return usd_eur, False
+    return (Decimal('1') / usd_eur), False
+
+
+def _portfolio_fx_rate(
+    portfolio: Portfolio,
+    from_cur: str,
+    to_cur: str,
+) -> Tuple[Decimal, bool]:
+    """Курс USD/EUR с приоритетом ручной настройки портфеля."""
+    f = (from_cur or '').upper()
+    t = (to_cur or '').upper()
+
+    if f == t:
+        return Decimal('1'), False
+
+    manual_usd_eur = getattr(portfolio, 'manual_usd_eur_rate', None)
+    if manual_usd_eur is not None:
+        rate = Decimal(str(manual_usd_eur))
+        if rate > 0:
+            if f == Portfolio.CURRENCY_USD and t == Portfolio.CURRENCY_EUR:
+                return rate, False
+            if f == Portfolio.CURRENCY_EUR and t == Portfolio.CURRENCY_USD:
+                return Decimal('1') / rate, False
+
+    return _fx_rate(f, t)
 
 
 class PortfolioAnalyzer:
@@ -189,7 +288,124 @@ class PortfolioAnalyzer:
             'profit_loss_percent': profit_loss_percent,
             'assets': assets_info,
         }
-    
+
+    def get_fiat_pnl(self, currency: Optional[str] = None) -> Dict:
+        """
+        Прибыль/убыток портфеля по фиатному учёту :class:`FiatCashFlow` (PLAN11).
+
+        В отличие от :meth:`get_current_value`, считает P&L не от
+        ``Portfolio.initial_amount + Σ contributions``, а от суммы реально
+        введённых на биржи/кошельки наличных (только депозиты, без вычета
+        выводов в знаменателе процента).
+
+        Args:
+            currency: 'USD' или 'EUR'. ``None`` → ``portfolio.base_currency``.
+
+        Returns:
+            Словарь со следующими ключами:
+
+            * ``currency`` (str): выбранная валюта вывода.
+            * ``cash_in_total`` (float): Σ депозитов в ``currency``.
+            * ``cash_out_total`` (float): Σ выводов в ``currency``.
+            * ``net_cash_in`` (float): ``cash_in_total − cash_out_total``.
+            * ``current_value`` (float): стоимость крипты в ``currency``
+              (units × units_scale × цена CoinGecko в ``currency``).
+            * ``profit_loss`` (float): ``current_value − net_cash_in``.
+            * ``profit_loss_percent`` (float): ``profit_loss / cash_in_total
+              × 100``. При ``cash_in_total == 0`` → ``0.0``.
+            * ``no_cash_in`` (bool): ``True``, если ``cash_in_total == 0``
+              (UI показывает CTA вместо нулей).
+            * ``fx_stale`` (bool): ``True``, если хотя бы один FX-курс
+              (``base → currency`` или EUR-цены через USD×FX) пришёл из
+              fallback-источника.
+        """
+        base = (self.portfolio.base_currency or Portfolio.CURRENCY_USD).upper()
+        cur = (currency or base).upper()
+        if cur not in ('USD', 'EUR'):
+            raise ValueError(
+                f"Неподдерживаемая валюта: {currency!r}. Допустимо: 'USD', 'EUR'."
+            )
+
+        fx_stale = False
+        if cur == base:
+            fx_b2c = Decimal('1')
+        else:
+            fx_b2c, stale_b2c = _portfolio_fx_rate(self.portfolio, base, cur)
+            if stale_b2c:
+                fx_stale = True
+
+        cash_in_base = Decimal('0')
+        cash_out_base = Decimal('0')
+        for flow in self.portfolio.fiat_cash_flows.all():
+            amount_in_base = flow.amount_in_base
+            if flow.kind == FiatCashFlow.KIND_DEPOSIT:
+                cash_in_base += amount_in_base
+            elif flow.kind == FiatCashFlow.KIND_WITHDRAWAL:
+                cash_out_base += amount_in_base
+
+        cash_in_total = float(cash_in_base * fx_b2c)
+        cash_out_total = float(cash_out_base * fx_b2c)
+        net_cash_in = cash_in_total - cash_out_total
+
+        assets = list(self.portfolio.assets.all())
+        symbols = [a.symbol for a in assets]
+        manual_usd_eur = getattr(self.portfolio, 'manual_usd_eur_rate', None)
+        if symbols and cur == 'EUR' and manual_usd_eur:
+            usd_prices = self.price_service.get_prices_in_currency(symbols, 'USD')
+            rate = float(Decimal(str(manual_usd_eur)))
+            prices: Dict[str, float] = {
+                symbol: float(price or 0) * rate
+                for symbol, price in usd_prices.items()
+            }
+        else:
+            prices = (
+                self.price_service.get_prices_in_currency(symbols, cur)
+                if symbols else {}
+            )
+        _, units_scale = self._get_dca_corrected_invested()
+
+        current_value = 0.0
+        for asset in assets:
+            price = float(prices.get(asset.symbol, 0) or 0)
+            units = float(asset.units or 0) * units_scale
+            current_value += units * price
+
+        # EUR-цены могли быть посчитаны как USD × FX (см. A3 fallback) —
+        # помечаем такой ответ как fx_stale, чтобы фронт показал
+        # «курс временно недоступен».
+        if cur == 'EUR' and symbols and not fx_stale:
+            try:
+                known_sorted = sorted({
+                    s.upper() for s in symbols
+                    if s and s.upper() in self.price_service.SYMBOL_TO_ID
+                })
+                if known_sorted:
+                    fallback_key = (
+                        f"prices_eur:{','.join(known_sorted)}:eur_via_fx_fallback"
+                    )
+                    if self.price_service.cache.get_stale(fallback_key):
+                        fx_stale = True
+            except Exception:  # noqa: BLE001 — диагностический флаг, не критичный
+                pass
+
+        no_cash_in = cash_in_total <= 0
+        profit_loss = current_value - net_cash_in
+        profit_loss_percent = (
+            (profit_loss / cash_in_total * 100) if cash_in_total > 0 else 0.0
+        )
+
+        return {
+            'currency': cur,
+            'cash_in_total': cash_in_total,
+            'cash_out_total': cash_out_total,
+            'net_cash_in': net_cash_in,
+            'current_value': current_value,
+            'profit_loss': profit_loss,
+            'profit_loss_percent': profit_loss_percent,
+            'no_cash_in': no_cash_in,
+            'fx_stale': fx_stale,
+        }
+
     def get_drawdown(self) -> Dict:
         """
         Рассчитать текущую просадку.

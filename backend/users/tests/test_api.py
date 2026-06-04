@@ -3,11 +3,16 @@
 """
 
 import uuid
+from datetime import date
+from decimal import Decimal
+from unittest.mock import patch
+
 from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
 
 from users.models import InvestorProfile
+from portfolios.models import FiatCashFlow, Portfolio, PortfolioAsset
 
 
 class InvestorProfileAPITests(TestCase):
@@ -254,3 +259,53 @@ class ProfileLookupAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['session_id'], session_id)
         self.assertEqual(response.data['name'], 'НайденныйПользователь')
+
+    @patch('advisor.services.PriceService.get_prices_in_currency')
+    def test_lookup_uses_fiat_pnl_when_cash_flows_exist(self, mock_prices):
+        """Welcome/lookup: при FiatCashFlow — P&L по фиату, не legacy DCA."""
+        mock_prices.return_value = {'BTC': 3619.0}
+        session_id = str(uuid.uuid4())
+        InvestorProfile.objects.create(
+            session_id=session_id,
+            name='Real',
+            investment_horizon=3,
+            investment_amount=5000,
+            max_drawdown=10,
+        )
+        portfolio = Portfolio.objects.create(
+            session_id=session_id,
+            name='Мой портфель (импорт)',
+            initial_amount=Decimal('4656.81'),
+            target_years=5,
+            is_active=True,
+        )
+        PortfolioAsset.objects.create(
+            portfolio=portfolio,
+            symbol='BTC',
+            name='Bitcoin',
+            percentage=Decimal('100'),
+            initial_price=Decimal('80000'),
+            units=Decimal('1'),
+            is_recommended=True,
+        )
+        FiatCashFlow.objects.create(
+            portfolio=portfolio,
+            kind=FiatCashFlow.KIND_DEPOSIT,
+            amount=Decimal('3386.33'),
+            currency='USD',
+            fx_rate_to_base=Decimal('1'),
+            occurred_on=date.today(),
+        )
+
+        response = self.client.get(self.lookup_url, {'name': 'Real'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        p = response.data['portfolio']
+        self.assertTrue(p['use_fiat_pnl'])
+        self.assertAlmostEqual(p['cash_in_total'], 3386.33, places=2)
+        self.assertAlmostEqual(p['current_value'], 3619.0, places=2)
+        self.assertGreater(p['profit_loss'], 0)
+        self.assertGreater(p['profit_loss_percent'], 0)
+        # Legacy initial_value был бы ~4656 — не должен «просачиваться».
+        self.assertLess(p['initial_value'], 4000)
+        self.assertEqual(response.data['analysis']['status'], 'profit')

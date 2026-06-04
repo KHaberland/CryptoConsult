@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Alert } from '@/components/ui/Alert'
 import { cn, formatCurrency, formatUnits } from '@/lib/utils'
+import { parseApiError, type MirrorPairConflictInfo } from '@/lib/api-errors'
 import type {
   HoldingAdjustInput,
   Wallet,
@@ -47,23 +48,6 @@ function parseDecimalInput(raw: string): number {
   return parseFloat((raw || '').replace(',', '.'))
 }
 
-function formatApiError(error: unknown, fallback: string): string {
-  const data = (error as { response?: { data?: unknown } } | undefined)
-    ?.response?.data
-  if (!data) return fallback
-  if (typeof data === 'string') return data
-  if (typeof data === 'object') {
-    const obj = data as Record<string, unknown>
-    if (typeof obj.detail === 'string') return obj.detail
-    const msgs: string[] = []
-    for (const v of Object.values(obj)) {
-      if (Array.isArray(v)) msgs.push(...v.map((m) => String(m)))
-      else if (typeof v === 'string') msgs.push(v)
-    }
-    if (msgs.length) return msgs.join('. ')
-  }
-  return fallback
-}
 
 export function AdjustHoldingModal({
   isOpen,
@@ -80,6 +64,7 @@ export function AdjustHoldingModal({
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [mirrorConflict, setMirrorConflict] = useState<MirrorPairConflictInfo | null>(null)
 
   const currentUnits = useMemo(
     () => toNumber(holding?.units),
@@ -102,6 +87,7 @@ export function AdjustHoldingModal({
     if (!isOpen) return
     setStep('form')
     setError(null)
+    setMirrorConflict(null)
     setSubmitting(false)
     setReason('')
     setNote('')
@@ -138,6 +124,7 @@ export function AdjustHoldingModal({
 
     setSubmitting(true)
     setError(null)
+    setMirrorConflict(null)
 
     try {
       const payload: HoldingAdjustInput = {
@@ -150,7 +137,13 @@ export function AdjustHoldingModal({
       await onConfirm(wallet.id, holding.symbol, payload)
       setStep('success')
     } catch (err: unknown) {
-      setError(formatApiError(err, 'Не удалось скорректировать баланс.'))
+      const parsed = parseApiError(err, 'Не удалось скорректировать баланс.')
+      if (parsed.mirrorConflict) {
+        setMirrorConflict(parsed.mirrorConflict)
+        setError(parsed.message)
+      } else {
+        setError(parsed.message)
+      }
     } finally {
       setSubmitting(false)
     }
@@ -338,7 +331,21 @@ export function AdjustHoldingModal({
           disabled={submitting}
         />
 
-        {error && <Alert variant="error">{error}</Alert>}
+        {mirrorConflict ? (
+          <Alert
+            variant="warning"
+            title="Похоже, это та же операция, что и контрибьюшн"
+          >
+            <p className="mb-1">{error}</p>
+            <p className="text-xs opacity-80">
+              {mirrorConflict.kind === 'contribution' ? 'Контрибьюшн' : 'Корректировка'}{' '}
+              #{mirrorConflict.id} от {mirrorConflict.date} по {mirrorConflict.symbol}{' '}
+              на ~{formatCurrency(mirrorConflict.value_usd)}.
+            </p>
+          </Alert>
+        ) : (
+          error && <Alert variant="error">{error}</Alert>
+        )}
 
         <ModalFooter>
           <Button

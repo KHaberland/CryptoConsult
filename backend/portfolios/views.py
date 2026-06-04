@@ -1,5 +1,5 @@
-from decimal import Decimal
-from rest_framework import status
+from decimal import Decimal, ROUND_HALF_UP
+from rest_framework import serializers, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
@@ -7,6 +7,7 @@ from datetime import date
 from django.db import transaction
 
 from .models import (
+    FiatCashFlow,
     Portfolio,
     PortfolioAsset,
     PortfolioContribution,
@@ -19,6 +20,7 @@ from .models import (
     HoldingAdjustment,
 )
 from .serializers import (
+    FiatCashFlowSerializer,
     PortfolioSerializer,
     PortfolioCreateSerializer,
     ContributeByUnitsSerializer,
@@ -30,7 +32,159 @@ from .serializers import (
     WalletUpdateSerializer,
 )
 from .services import PriceService, WalletLedger, recompute_percentages_by_market
-from advisor.services import PortfolioAnalyzer
+from advisor.services import PortfolioAnalyzer, _portfolio_fx_rate
+
+# ============ MirrorPairGuard (PLAN12) ============
+#
+# Защита от случайного создания «зеркальной пары» PortfolioContribution ↔
+# HoldingAdjustment одной и той же суммы по одному символу в близкие даты.
+# Такая пара получается, например, когда пользователь сначала ввёл
+# контрибьюшн на 0.028 BTC, а потом в тот же день обнулил эти 0.028 BTC
+# на бирже через корректировку баланса. Контрибьюшн остаётся в
+# `Σ contributions`, units списываются adjustment'ом — старый расчёт
+# P&L начинает показывать фантомную просадку.
+#
+# Поведение по PLAN12: при обнаружении зеркала возвращаем 409, без
+# возможности «продолжить всё равно» — пользователь обязан удалить
+# одну из операций руками и повторить запрос.
+
+# Окно поиска зеркальной пары (±N дней от occurred_on).
+_MIRROR_PAIR_WINDOW_DAYS = 3
+# Относительный допуск при сравнении долларовых сумм (%).
+_MIRROR_PAIR_VALUE_TOL_PCT = Decimal('0.01')
+# Абсолютный допуск (минимум одна копейка).
+_MIRROR_PAIR_VALUE_TOL_ABS = Decimal('0.01')
+
+
+def _values_match_within_tolerance(a, b) -> bool:
+    """Сравнить две долларовые суммы с допуском 1 % (но не меньше $0.01)."""
+    try:
+        a_abs = abs(Decimal(str(a or 0)))
+        b_abs = abs(Decimal(str(b or 0)))
+    except (TypeError, ValueError):
+        return False
+    if a_abs == 0 and b_abs == 0:
+        return True
+    diff = abs(a_abs - b_abs)
+    tol = (
+        max(a_abs, b_abs) * _MIRROR_PAIR_VALUE_TOL_PCT
+        + _MIRROR_PAIR_VALUE_TOL_ABS
+    )
+    return diff <= tol
+
+
+def _date_window(occurred_on):
+    """Вернуть (date_low, date_high) — окно поиска зеркала."""
+    from datetime import timedelta
+    return (
+        occurred_on - timedelta(days=_MIRROR_PAIR_WINDOW_DAYS),
+        occurred_on + timedelta(days=_MIRROR_PAIR_WINDOW_DAYS),
+    )
+
+
+def _find_mirror_contribution_item(portfolio, symbol, value_usd, occurred_on):
+    """Найти PortfolioContributionItem, который может быть «зеркалом»
+    для создаваемого отрицательного HoldingAdjustment.
+
+    Returns:
+        Первый совпавший PortfolioContributionItem или None.
+    """
+    try:
+        v = Decimal(str(value_usd or 0))
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    d_lo, d_hi = _date_window(occurred_on)
+    candidates = PortfolioContributionItem.objects.filter(
+        contribution__portfolio=portfolio,
+        symbol=symbol,
+        contribution__contributed_at__gte=d_lo,
+        contribution__contributed_at__lte=d_hi,
+    ).select_related('contribution')
+    for item in candidates:
+        if _values_match_within_tolerance(item.value_usd, v):
+            return item
+    return None
+
+
+def _find_mirror_adjustment(portfolio, symbol, value_usd, occurred_on):
+    """Найти HoldingAdjustment с отрицательной value_delta_usd, способный
+    быть «зеркалом» для создаваемого PortfolioContribution(item).
+
+    Returns:
+        Первый совпавший HoldingAdjustment или None.
+    """
+    try:
+        v = Decimal(str(value_usd or 0))
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    d_lo, d_hi = _date_window(occurred_on)
+    candidates = HoldingAdjustment.objects.filter(
+        holding__wallet__portfolio=portfolio,
+        holding__symbol=symbol,
+        occurred_on__gte=d_lo,
+        occurred_on__lte=d_hi,
+        value_delta_usd__lt=0,
+    ).select_related('holding', 'holding__wallet')
+    for adj in candidates:
+        if _values_match_within_tolerance(adj.value_delta_usd, v):
+            return adj
+    return None
+
+
+def _mirror_pair_conflict_response(
+    *,
+    conflicting_kind: str,
+    conflicting_id: int,
+    conflicting_date,
+    symbol: str,
+    value_usd,
+    action_kind: str,
+):
+    """Сформировать HTTP 409 для зеркального конфликта.
+
+    Args:
+        conflicting_kind: 'contribution' | 'adjustment' — что уже есть в БД.
+        action_kind: 'contribution' | 'adjustment' — что пытаемся создать.
+    """
+    try:
+        v_float = float(value_usd or 0)
+    except (TypeError, ValueError):
+        v_float = 0.0
+    if conflicting_kind == 'contribution' and action_kind == 'adjustment':
+        msg = (
+            f'Нельзя создать корректировку: {conflicting_date} уже есть '
+            f'контрибьюшн на ту же сумму (~${v_float:,.2f}) по {symbol}. '
+            f'Похоже, это одна и та же операция. Удалите контрибьюшн '
+            f'id={conflicting_id} (или измените текущую корректировку) '
+            f'и попробуйте снова.'
+        )
+    elif conflicting_kind == 'adjustment' and action_kind == 'contribution':
+        msg = (
+            f'Нельзя создать контрибьюшн: {conflicting_date} уже есть '
+            f'корректировка на ту же сумму (~${v_float:,.2f}) по {symbol}. '
+            f'Похоже, это одна и та же операция. Удалите корректировку '
+            f'id={conflicting_id} (или измените её) и попробуйте снова.'
+        )
+    else:
+        msg = 'Конфликт зеркальной операции.'
+    return Response(
+        {
+            'error': 'mirror_pair_conflict',
+            'detail': msg,
+            'conflicting': {
+                'kind': conflicting_kind,
+                'id': conflicting_id,
+                'date': str(conflicting_date),
+                'symbol': symbol,
+                'value_usd': round(v_float, 2),
+            },
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
 
 
 class PortfolioListCreateView(APIView):
@@ -124,9 +278,25 @@ class PortfolioDetailView(APIView):
 
 
 class PortfolioValueView(APIView):
-    """Текущая стоимость портфеля."""
+    """Текущая стоимость портфеля.
+
+    PLAN11 — A6: к старому блоку метрик (``total_value``/``initial_value``/
+    ``profit_loss``/``profit_loss_percent``, legacy-расчёт от
+    ``Portfolio.initial_amount + Σ contributions``) добавлен новый блок
+    ``fiat_pnl`` с расчётом P&L по подсистеме :class:`FiatCashFlow`.
+
+    Query params:
+        currency: ``USD`` | ``EUR``. Если не указан — берётся
+            ``portfolio.base_currency``. Любое другое значение → HTTP 400.
+    """
+
     permission_classes = (AllowAny,)
-    
+
+    _ALLOWED_CURRENCIES = frozenset({
+        Portfolio.CURRENCY_USD,
+        Portfolio.CURRENCY_EUR,
+    })
+
     def get(self, request):
         """Получить текущую стоимость активного портфеля."""
         portfolio = Portfolio.objects.filter(
@@ -139,7 +309,21 @@ class PortfolioValueView(APIView):
                 {'detail': 'Активный портфель не найден.'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+
+        # Определяем целевую валюту для блока fiat_pnl. Пустая строка
+        # трактуется как «не задано» и приравнивается к base_currency
+        # портфеля (PLAN11 — A6).
+        currency_raw = request.query_params.get('currency')
+        if currency_raw is None or str(currency_raw).strip() == '':
+            currency = portfolio.base_currency or Portfolio.CURRENCY_USD
+        else:
+            currency = str(currency_raw).strip().upper()
+            if currency not in self._ALLOWED_CURRENCIES:
+                return Response(
+                    {'detail': "Параметр currency должен быть 'USD' или 'EUR'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         analyzer = PortfolioAnalyzer(portfolio)
         value_data = analyzer.get_current_value()
         
@@ -184,7 +368,11 @@ class PortfolioValueView(APIView):
         target_date = portfolio.target_date
         days_remaining = (target_date - today).days if target_date > today else 0
         days_active = (today - portfolio.start_date).days
-        
+
+        # ╨¥╨╛╨▓╤ï╨╣ ╨▒╨╗╨╛╨║ P&L ╨┐╨╛ FiatCashFlow (PLAN11 ΓÇö A6). ╨í╤é╨░╤Ç╤ï╨╡ ╨┐╨╛╨╗╤Å ╨▓╤ï╤ê╨╡
+        # ╨╛╤ü╤é╨░╨▓╨╗╨╡╨╜╤ï ╨▒╨╡╨╖ ╨╕╨╖╨╝╨╡╨╜╨╡╨╜╨╕╨╣ ╤Ç╨░╨┤╨╕ ╨╛╨▒╤Ç╨░╤é╨╜╨╛╨╣ ╤ü╨╛╨▓╨╝╨╡╤ü╤é╨╕╨╝╨╛╤ü╤é╨╕.
+        fiat = analyzer.get_fiat_pnl(currency)
+
         response_data = {
             'portfolio_id': portfolio.id,
             'portfolio_name': portfolio.name,
@@ -200,6 +388,22 @@ class PortfolioValueView(APIView):
             'assets': assets_data,
             'contributions': contributions,
             'withdrawals': withdrawals,
+            'base_currency': portfolio.base_currency,
+            'manual_usd_eur_rate': (
+                float(portfolio.manual_usd_eur_rate)
+                if portfolio.manual_usd_eur_rate is not None else None
+            ),
+            'fiat_pnl': {
+                'currency': fiat['currency'],
+                'cash_in_total': round(fiat['cash_in_total'], 2),
+                'cash_out_total': round(fiat['cash_out_total'], 2),
+                'net_cash_in': round(fiat['net_cash_in'], 2),
+                'current_value': round(fiat['current_value'], 2),
+                'profit_loss': round(fiat['profit_loss'], 2),
+                'profit_loss_percent': round(fiat['profit_loss_percent'], 2),
+                'no_cash_in': bool(fiat['no_cash_in']),
+                'fx_stale': bool(fiat['fx_stale']),
+            },
         }
         
         return Response(response_data)
@@ -335,6 +539,46 @@ class ContributePortfolioView(APIView):
             top10_set = set(price_service.get_top10_recommended_symbols())
         except Exception:
             top10_set = set()
+
+        # MirrorPairGuard (PLAN12): если для какой-то из позиций в окне ±3 дня
+        # уже есть HoldingAdjustment с отрицательной value_delta_usd на ту же
+        # сумму по тому же символу — отказываем (HTTP 409). Зеркальная пара
+        # «контрибьюшн + adjustment» приводит к фантомной просадке в legacy P&L,
+        # см. историю портфеля #27 / разбор в _fix_p27_variantA.real.out.txt.
+        today_date = date.today()
+        for it in items:
+            symbol_check = it['symbol']
+            try:
+                units_check = float(it['units'])
+            except (TypeError, ValueError):
+                continue
+            pp_check_raw = it.get('purchase_price')
+            if pp_check_raw is None or pp_check_raw == '':
+                price_check = float(current_prices.get(symbol_check) or 0)
+            else:
+                try:
+                    price_check = float(pp_check_raw)
+                except (TypeError, ValueError):
+                    price_check = 0.0
+                if price_check <= 0:
+                    price_check = float(current_prices.get(symbol_check) or 0)
+            if price_check <= 0 or units_check <= 0:
+                continue
+            value_check = Decimal(
+                str(round(units_check * price_check, 2))
+            )
+            mirror_adj = _find_mirror_adjustment(
+                portfolio, symbol_check, value_check, today_date,
+            )
+            if mirror_adj is not None:
+                return _mirror_pair_conflict_response(
+                    conflicting_kind='adjustment',
+                    conflicting_id=mirror_adj.id,
+                    conflicting_date=mirror_adj.occurred_on,
+                    symbol=symbol_check,
+                    value_usd=value_check,
+                    action_kind='contribution',
+                )
 
         with transaction.atomic():
             # Определяем рабочий кошелёк (явный или default).
@@ -1624,6 +1868,42 @@ class HoldingAdjustView(APIView):
             prices = {}
         price = prices.get(sym)
 
+        # MirrorPairGuard (PLAN12): если корректировка списывает units и в
+        # окне ±3 дня есть PortfolioContribution на ту же сумму по тому же
+        # символу — отказываем (HTTP 409), пользователь должен удалить одну
+        # из операций руками. Race-condition между этим pre-check'ом и
+        # коммитом транзакции не критичен: при гонке просто пройдёт обычное
+        # сохранение, инвариант holdings/asset.units не пострадает.
+        existing_holding = WalletHolding.objects.filter(
+            wallet=wallet, symbol=sym
+        ).first()
+        units_before_guess: Decimal = Decimal(
+            str(existing_holding.units)
+        ) if existing_holding else Decimal('0')
+        delta_guess: Decimal = Decimal(str(units_after)) - units_before_guess
+        if delta_guess < 0 and price:
+            try:
+                value_delta_abs = abs(
+                    Decimal(str(price)) * delta_guess
+                ).quantize(Decimal('0.01'))
+            except (TypeError, ValueError):
+                value_delta_abs = Decimal('0')
+            if value_delta_abs > 0:
+                mirror_item = _find_mirror_contribution_item(
+                    portfolio, sym, value_delta_abs, occurred_on,
+                )
+                if mirror_item is not None:
+                    return _mirror_pair_conflict_response(
+                        conflicting_kind='contribution',
+                        conflicting_id=mirror_item.contribution_id,
+                        conflicting_date=(
+                            mirror_item.contribution.contributed_at
+                        ),
+                        symbol=sym,
+                        value_usd=value_delta_abs,
+                        action_kind='adjustment',
+                    )
+
         try:
             with transaction.atomic():
                 # Берём (и при необходимости создаём) holding, фиксируем units_before.
@@ -2065,3 +2345,307 @@ class PortfolioImportView(APIView):
                 ) if total_initial > 0 else 0,
             }
         }, status=status.HTTP_201_CREATED)
+
+
+# ============ FiatCashFlow CRUD (PLAN11 ΓÇö A5) ============
+
+_FX_RATE_QUANT = Decimal('0.000001')
+
+
+def _quantize_fx(rate: Decimal) -> Decimal:
+    """╨ƒ╤Ç╨╕╨▓╨╡╤ü╤é╨╕ ╨║╤â╤Ç╤ü ╨║ ╤é╨╛╤ç╨╜╨╛╤ü╤é╨╕ ╨┐╨╛╨╗╤Å ``FiatCashFlow.fx_rate_to_base`` (6 ╨╖╨╜╨░╨║╨╛╨▓)."""
+    if not isinstance(rate, Decimal):
+        rate = Decimal(str(rate))
+    return rate.quantize(_FX_RATE_QUANT, rounding=ROUND_HALF_UP)
+
+
+class FiatCashFlowListCreateView(APIView):
+    """╨í╨┐╨╕╤ü╨╛╨║ ╨╕ ╤ü╨╛╨╖╨┤╨░╨╜╨╕╨╡ ╤ä╨╕╨░╤é╨╜╤ï╤à ╨┤╨▓╨╕╨╢╨╡╨╜╨╕╨╣ ╨┐╨╛ ╨░╨║╤é╨╕╨▓╨╜╨╛╨╝╤â ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Ä.
+
+    * ``GET /api/portfolio/cash-flows/?kind=deposit|withdrawal&currency=USD|EUR``
+      ΓÇö ╨╛╤é╨┤╨░╤æ╤é ╤ü╨┐╨╕╤ü╨╛╨║ ``FiatCashFlow`` ╨░╨║╤é╨╕╨▓╨╜╨╛╨│╨╛ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å. ╨₧╨┐╤å╨╕╨╛╨╜╨░╨╗╤î╨╜╤ï╨╡
+      ╤ä╨╕╨╗╤î╤é╤Ç╤ï ╨┐╨╛ ``kind`` ╨╕ ``currency``. ╨ƒ╨░╨│╨╕╨╜╨░╤å╨╕╤Å ╨╜╨╡ ╨╕╤ü╨┐╨╛╨╗╤î╨╖╤â╨╡╤é╤ü╤Å
+      (╤ä╨╕╨░╤é╨╜╤ï╤à ╨╛╨┐╨╡╤Ç╨░╤å╨╕╨╣ ╨╛╨▒╤ï╤ç╨╜╨╛ ╨╜╨╡╨╝╨╜╨╛╨│╨╛, ╤ü╨╝. PLAN11 ┬ºA5).
+    * ``POST /api/portfolio/cash-flows/`` body
+      ``{kind, amount, currency, occurred_on?, note?}`` ΓÇö ╤ü╨╛╨╖╨┤╨░╤æ╤é ╨╖╨░╨┐╨╕╤ü╤î;
+      ``fx_rate_to_base`` ╨▒╨╡╤Ç╤æ╤é╤ü╤Å ╨╕╨╖ ``_fx_rate(currency,
+      portfolio.base_currency)``. ╨ò╤ü╨╗╨╕ FX ╨╜╨╡╨┤╨╛╤ü╤é╤â╨┐╨╡╨╜ ΓÇö ╨╖╨░╨┐╨╕╤ü╤ï╨▓╨░╨╡╨╝ 1.0 ╨╕
+      ╨▓╨╛╨╖╨▓╤Ç╨░╤ë╨░╨╡╨╝ ╨▓ ╤é╨╡╨╗╨╡ ``fx_stale: true``.
+    """
+
+    permission_classes = (AllowAny,)
+
+    def get(self, request):
+        portfolio = _get_active_portfolio(request)
+        if not portfolio:
+            return Response(
+                {'detail': '╨É╨║╤é╨╕╨▓╨╜╤ï╨╣ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤î ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        flows = portfolio.fiat_cash_flows.all()
+
+        kind = (request.query_params.get('kind') or '').strip().lower()
+        if kind:
+            if kind not in (
+                FiatCashFlow.KIND_DEPOSIT,
+                FiatCashFlow.KIND_WITHDRAWAL,
+            ):
+                return Response(
+                    {'detail': "╨ƒ╨░╤Ç╨░╨╝╨╡╤é╤Ç kind ╨┤╨╛╨╗╨╢╨╡╨╜ ╨▒╤ï╤é╤î 'deposit' ╨╕╨╗╨╕ 'withdrawal'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            flows = flows.filter(kind=kind)
+
+        currency = (request.query_params.get('currency') or '').strip().upper()
+        if currency:
+            if currency not in (
+                Portfolio.CURRENCY_USD,
+                Portfolio.CURRENCY_EUR,
+            ):
+                return Response(
+                    {'detail': "╨ƒ╨░╤Ç╨░╨╝╨╡╤é╤Ç currency ╨┤╨╛╨╗╨╢╨╡╨╜ ╨▒╤ï╤é╤î 'USD' ╨╕╨╗╨╕ 'EUR'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            flows = flows.filter(currency=currency)
+
+        items = FiatCashFlowSerializer(flows, many=True).data
+        return Response({'items': items, 'count': len(items)})
+
+    def post(self, request):
+        portfolio = _get_active_portfolio(request)
+        if not portfolio:
+            return Response(
+                {'detail': '╨É╨║╤é╨╕╨▓╨╜╤ï╨╣ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤î ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = FiatCashFlowSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        rate, stale = _portfolio_fx_rate(
+            portfolio, data['currency'], portfolio.base_currency
+        )
+        fx_rate_to_base = _quantize_fx(rate)
+
+        flow = FiatCashFlow.objects.create(
+            portfolio=portfolio,
+            kind=data['kind'],
+            amount=data['amount'],
+            currency=data['currency'],
+            fx_rate_to_base=fx_rate_to_base,
+            occurred_on=data['occurred_on'],
+            note=data.get('note', ''),
+        )
+
+        body = FiatCashFlowSerializer(flow).data
+        body['fx_stale'] = bool(stale)
+        return Response(body, status=status.HTTP_201_CREATED)
+
+
+class FiatCashFlowDetailView(APIView):
+    """╨º╨░╤ü╤é╨╕╤ç╨╜╨╛╨╡ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨╕ ╤â╨┤╨░╨╗╨╡╨╜╨╕╨╡ ╨╛╨┤╨╜╨╛╨│╨╛ :class:`FiatCashFlow`.
+
+    * ``PATCH /api/portfolio/cash-flows/<id>/`` ΓÇö ╤Ç╨░╨╖╤Ç╨╡╤ê╨╡╨╜╨╛ ╨╝╨╡╨╜╤Å╤é╤î ╤é╨╛╨╗╤î╨║╨╛
+      ``note`` ╨╕ ``occurred_on``. ╨¢╤Ä╨▒╨╛╨╡ ╨┤╤Ç╤â╨│╨╛╨╡ ╨┐╨╛╨╗╨╡ (``amount`` /
+      ``currency`` / ``kind`` / ``fx_rate_to_base``) ΓåÆ 400. ╨ò╤ü╨╗╨╕ ╨╜╤â╨╢╨╜╨╛
+      ╨╕╤ü╨┐╤Ç╨░╨▓╨╕╤é╤î ╤ü╤â╨╝╨╝╤â ╨╕╨╗╨╕ ╨▓╨░╨╗╤Ä╤é╤â ΓÇö ╤â╨┤╨░╨╗╨╕╤é╨╡ ╨╖╨░╨┐╨╕╤ü╤î ╨╕ ╤ü╨╛╨╖╨┤╨░╨╣╤é╨╡ ╨╖╨░╨╜╨╛╨▓╨╛.
+    * ``DELETE /api/portfolio/cash-flows/<id>/`` ΓÇö ╨╢╤æ╤ü╤é╨║╨╛╨╡ ╤â╨┤╨░╨╗╨╡╨╜╨╕╨╡.
+      ╨ù╨░╨┐╨╕╤ü╤î ╨┤╨╛╨╗╨╢╨╜╨░ ╨┐╤Ç╨╕╨╜╨░╨┤╨╗╨╡╨╢╨░╤é╤î ╨░╨║╤é╨╕╨▓╨╜╨╛╨╝╤â ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Ä ╤é╨╡╨║╤â╤ë╨╡╨╣ ╤ü╨╡╤ü╤ü╨╕╨╕,
+      ╨╕╨╜╨░╤ç╨╡ 404.
+    """
+
+    permission_classes = (AllowAny,)
+
+    _PATCH_ALLOWED_FIELDS = frozenset({'note', 'occurred_on'})
+
+    def _get_flow(self, request, pk):
+        portfolio = _get_active_portfolio(request)
+        if not portfolio:
+            return None, None
+        flow = FiatCashFlow.objects.filter(
+            portfolio=portfolio, pk=pk
+        ).first()
+        return portfolio, flow
+
+    def patch(self, request, pk):
+        _, flow = self._get_flow(request, pk)
+        if flow is None:
+            return Response(
+                {'detail': '╨ñ╨╕╨░╤é╨╜╨░╤Å ╨╛╨┐╨╡╤Ç╨░╤å╨╕╤Å ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜╨░.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        incoming = set(request.data.keys())
+        forbidden = incoming - self._PATCH_ALLOWED_FIELDS
+        if forbidden:
+            return Response(
+                {
+                    'detail': (
+                        f"╨ƒ╨╛╨╗╤Å {', '.join(sorted(forbidden))} "
+                        f"╨╜╨╡╨╗╤î╨╖╤Å ╤Ç╨╡╨┤╨░╨║╤é╨╕╤Ç╨╛╨▓╨░╤é╤î. ╨ú╨┤╨░╨╗╨╕╤é╨╡ ╨╛╨┐╨╡╤Ç╨░╤å╨╕╤Ä ╨╕ ╤ü╨╛╨╖╨┤╨░╨╣╤é╨╡ ╨╖╨░╨╜╨╛╨▓╨╛."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        update_fields = []
+
+        if 'occurred_on' in request.data:
+            date_field = serializers.DateField()
+            try:
+                new_occurred = date_field.run_validation(
+                    request.data.get('occurred_on')
+                )
+            except serializers.ValidationError as e:
+                return Response(
+                    {'occurred_on': e.detail},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if new_occurred and new_occurred > date.today():
+                return Response(
+                    {'occurred_on': '╨ö╨░╤é╨░ ╨╛╨┐╨╡╤Ç╨░╤å╨╕╨╕ ╨╜╨╡ ╨╝╨╛╨╢╨╡╤é ╨▒╤ï╤é╤î ╨▓ ╨▒╤â╨┤╤â╤ë╨╡╨╝.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            flow.occurred_on = new_occurred
+            update_fields.append('occurred_on')
+
+        if 'note' in request.data:
+            note = request.data.get('note') or ''
+            if not isinstance(note, str):
+                note = str(note)
+            if len(note) > 200:
+                return Response(
+                    {'note': '╨Ü╨╛╨╝╨╝╨╡╨╜╤é╨░╤Ç╨╕╨╣ ╤ü╨╗╨╕╤ê╨║╨╛╨╝ ╨┤╨╗╨╕╨╜╨╜╤ï╨╣ (╨╝╨░╨║╤ü╨╕╨╝╤â╨╝ 200 ╤ü╨╕╨╝╨▓╨╛╨╗╨╛╨▓).'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            flow.note = note
+            update_fields.append('note')
+
+        if update_fields:
+            flow.save(update_fields=update_fields)
+
+        return Response(FiatCashFlowSerializer(flow).data)
+
+    def delete(self, request, pk):
+        _, flow = self._get_flow(request, pk)
+        if flow is None:
+            return Response(
+                {'detail': '╨ñ╨╕╨░╤é╨╜╨░╤Å ╨╛╨┐╨╡╤Ç╨░╤å╨╕╤Å ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜╨░.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        flow.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PortfolioBaseCurrencyView(APIView):
+    """╨í╨╝╨╡╨╜╨░ ╨▒╨░╨╖╨╛╨▓╨╛╨╣ ╨▓╨░╨╗╤Ä╤é╤ï ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å (PLAN11 ΓÇö A6).
+
+    ``PATCH /api/portfolio/<id>/currency/`` body ``{"base_currency": "USD"|"EUR"}``.
+
+    ╨ƒ╤Ç╨╕ ╤ä╨░╨║╤é╨╕╤ç╨╡╤ü╨║╨╛╨╣ ╤ü╨╝╨╡╨╜╨╡ ``base_currency`` (``USD Γåö EUR``) ╨┤╨╗╤Å ╨▓╤ü╨╡╤à
+    ╤ü╨▓╤Å╨╖╨░╨╜╨╜╤ï╤à :class:`FiatCashFlow` ╨┐╨╡╤Ç╨╡╤ü╤ç╨╕╤é╤ï╨▓╨░╨╡╤é╤ü╤Å ``fx_rate_to_base``
+    ╤ç╨╡╤Ç╨╡╨╖ :func:`advisor.services._fx_rate(flow.currency, new_base)`.
+    ╨ò╤ü╨╗╨╕ ╤à╨╛╤é╤Å ╨▒╤ï ╨╛╨┤╨╕╨╜ ╨║╤â╤Ç╤ü ╨┐╤Ç╨╕╤ê╤æ╨╗ ╨╕╨╖ fallback'╨░ (``stale=True``) ΓÇö
+    ╨▓ ╨╛╤é╨▓╨╡╤é╨╡ ``fx_stale: true``.
+
+    ╨ö╨╛╤ü╤é╤â╨┐ ΓÇö ╤é╨╛╨╗╤î╨║╨╛ ╨║ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Ä ╤é╨╡╨║╤â╤ë╨╡╨╣ ╤ü╨╡╤ü╤ü╨╕╨╕ (``session_id`` ╨╕╨╖
+    middleware), ╨╕╨╜╨░╤ç╨╡ 404.
+    """
+
+    permission_classes = (AllowAny,)
+
+    _ALLOWED = frozenset({
+        Portfolio.CURRENCY_USD,
+        Portfolio.CURRENCY_EUR,
+    })
+
+    def patch(self, request, pk):
+        try:
+            portfolio = Portfolio.objects.get(
+                pk=pk, session_id=request.session_id
+            )
+        except Portfolio.DoesNotExist:
+            return Response(
+                {'detail': '╨ƒ╨╛╤Ç╤é╤ä╨╡╨╗╤î ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        raw = request.data.get('base_currency')
+        if not isinstance(raw, str) or not raw.strip():
+            return Response(
+                {'detail': "╨ƒ╨╛╨╗╨╡ base_currency ╨╛╨▒╤Å╨╖╨░╤é╨╡╨╗╤î╨╜╨╛ (USD ╨╕╨╗╨╕ EUR)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        new_currency = raw.strip().upper()
+        if new_currency not in self._ALLOWED:
+            return Response(
+                {'detail': "╨ö╨╛╨┐╤â╤ü╤é╨╕╨╝╤ï╨╡ ╨╖╨╜╨░╤ç╨╡╨╜╨╕╤Å base_currency: 'USD' ╨╕╨╗╨╕ 'EUR'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        manual_rate_provided = 'manual_usd_eur_rate' in request.data
+        manual_rate = portfolio.manual_usd_eur_rate
+        if manual_rate_provided:
+            raw_manual_rate = request.data.get('manual_usd_eur_rate')
+            if raw_manual_rate in (None, ''):
+                manual_rate = None
+            else:
+                try:
+                    manual_rate = Decimal(str(raw_manual_rate))
+                except Exception:  # noqa: BLE001 — DRF отдаст единый 400
+                    return Response(
+                        {'manual_usd_eur_rate': 'Введите корректный курс USD→EUR.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if not manual_rate.is_finite() or manual_rate <= 0:
+                    return Response(
+                        {'manual_usd_eur_rate': 'Курс USD→EUR должен быть больше нуля.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                manual_rate = _quantize_fx(manual_rate)
+
+        fx_stale = False
+        with transaction.atomic():
+            # ╨æ╨╗╨╛╨║╨╕╤Ç╤â╨╡╨╝ ╤ü╤é╤Ç╨╛╨║╤â ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å ╨╜╨░ ╨▓╤Ç╨╡╨╝╤Å ╨░╨┐╨┤╨╡╨╣╤é╨░, ╤ç╤é╨╛╨▒╤ï ╨┐╨░╤Ç╨░╨╗╨╗╨╡╨╗╤î╨╜╤ï╨╡
+            # PATCH'╨╕ ╨╜╨╡ ┬½╨│╨╜╨░╨╗╨╕╤ü╤î┬╗ ╨╖╨░ ╨┐╨╡╤Ç╨╡╤ü╤ç╤æ╤é╨╛╨╝ FX.
+            portfolio = Portfolio.objects.select_for_update().get(pk=portfolio.pk)
+
+            old_manual_rate = portfolio.manual_usd_eur_rate
+            currency_changed = portfolio.base_currency != new_currency
+            rate_changed = manual_rate_provided and old_manual_rate != manual_rate
+
+            update_fields = []
+            if currency_changed:
+                portfolio.base_currency = new_currency
+                update_fields.append('base_currency')
+            if rate_changed:
+                portfolio.manual_usd_eur_rate = manual_rate
+                update_fields.append('manual_usd_eur_rate')
+
+            if update_fields:
+                portfolio.save(update_fields=update_fields)
+
+            if currency_changed or rate_changed:
+                flows = list(
+                    portfolio.fiat_cash_flows.select_for_update()
+                )
+                for flow in flows:
+                    rate, stale = _portfolio_fx_rate(
+                        portfolio, flow.currency, new_currency
+                    )
+                    flow.fx_rate_to_base = _quantize_fx(rate)
+                    if stale:
+                        fx_stale = True
+                    flow.save(update_fields=['fx_rate_to_base'])
+
+        return Response({
+            'ok': True,
+            'base_currency': portfolio.base_currency,
+            'manual_usd_eur_rate': (
+                float(portfolio.manual_usd_eur_rate)
+                if portfolio.manual_usd_eur_rate is not None else None
+            ),
+            'fx_stale': fx_stale,
+        })

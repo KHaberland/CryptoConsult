@@ -1,0 +1,68 @@
+diff a/backend/portfolios/views.py b/backend/portfolios/views.py	(rejected hunks)
+@@ -124,9 +126,25 @@ class PortfolioDetailView(APIView):
+ 
+ 
+ class PortfolioValueView(APIView):
+-    """╨ó╨╡╨║╤â╤ë╨░╤Å ╤ü╤é╨╛╨╕╨╝╨╛╤ü╤é╤î ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å."""
++    """╨ó╨╡╨║╤â╤ë╨░╤Å ╤ü╤é╨╛╨╕╨╝╨╛╤ü╤é╤î ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å.
++
++    PLAN11 ΓÇö A6: ╨║ ╤ü╤é╨░╤Ç╨╛╨╝╤â ╨▒╨╗╨╛╨║╤â ╨╝╨╡╤é╤Ç╨╕╨║ (``total_value``/``initial_value``/
++    ``profit_loss``/``profit_loss_percent``, legacy-╤Ç╨░╤ü╤ç╤æ╤é ╨╛╤é
++    ``Portfolio.initial_amount + ╬ú contributions``) ╨┤╨╛╨▒╨░╨▓╨╗╨╡╨╜ ╨╜╨╛╨▓╤ï╨╣ ╨▒╨╗╨╛╨║
++    ``fiat_pnl`` ╤ü ╤Ç╨░╤ü╤ç╤æ╤é╨╛╨╝ P&L ╨┐╨╛ ╨┐╨╛╨┤╤ü╨╕╤ü╤é╨╡╨╝╨╡ :class:`FiatCashFlow`.
++
++    Query params:
++        currency: ``USD`` | ``EUR``. ╨ò╤ü╨╗╨╕ ╨╜╨╡ ╤â╨║╨░╨╖╨░╨╜ ΓÇö ╨▒╨╡╤Ç╤æ╤é╤ü╤Å
++            ``portfolio.base_currency``. ╨¢╤Ä╨▒╨╛╨╡ ╨┤╤Ç╤â╨│╨╛╨╡ ╨╖╨╜╨░╤ç╨╡╨╜╨╕╨╡ ΓåÆ HTTP 400.
++    """
++
+     permission_classes = (AllowAny,)
+-    
++
++    _ALLOWED_CURRENCIES = frozenset({
++        Portfolio.CURRENCY_USD,
++        Portfolio.CURRENCY_EUR,
++    })
++
+     def get(self, request):
+         """╨ƒ╨╛╨╗╤â╤ç╨╕╤é╤î ╤é╨╡╨║╤â╤ë╤â╤Ä ╤ü╤é╨╛╨╕╨╝╨╛╤ü╤é╤î ╨░╨║╤é╨╕╨▓╨╜╨╛╨│╨╛ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å."""
+         portfolio = Portfolio.objects.filter(
+@@ -139,7 +157,21 @@ class PortfolioValueView(APIView):
+                 {'detail': '╨É╨║╤é╨╕╨▓╨╜╤ï╨╣ ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤î ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜.'},
+                 status=status.HTTP_404_NOT_FOUND
+             )
+-        
++
++        # ╨₧╨┐╤Ç╨╡╨┤╨╡╨╗╤Å╨╡╨╝ ╤å╨╡╨╗╨╡╨▓╤â╤Ä ╨▓╨░╨╗╤Ä╤é╤â ╨┤╨╗╤Å ╨▒╨╗╨╛╨║╨░ fiat_pnl. ╨ƒ╤â╤ü╤é╨░╤Å ╤ü╤é╤Ç╨╛╨║╨░
++        # ╤é╤Ç╨░╨║╤é╤â╨╡╤é╤ü╤Å ╨║╨░╨║ ┬½╨╜╨╡ ╨╖╨░╨┤╨░╨╜╨╛┬╗ ╨╕ ╨┐╤Ç╨╕╤Ç╨░╨▓╨╜╨╕╨▓╨░╨╡╤é╤ü╤Å ╨║ base_currency
++        # ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å (PLAN11 ΓÇö A6).
++        currency_raw = request.query_params.get('currency')
++        if currency_raw is None or str(currency_raw).strip() == '':
++            currency = portfolio.base_currency or Portfolio.CURRENCY_USD
++        else:
++            currency = str(currency_raw).strip().upper()
++            if currency not in self._ALLOWED_CURRENCIES:
++                return Response(
++                    {'detail': "╨ƒ╨░╤Ç╨░╨╝╨╡╤é╤Ç currency ╨┤╨╛╨╗╨╢╨╡╨╜ ╨▒╤ï╤é╤î 'USD' ╨╕╨╗╨╕ 'EUR'."},
++                    status=status.HTTP_400_BAD_REQUEST,
++                )
++
+         analyzer = PortfolioAnalyzer(portfolio)
+         value_data = analyzer.get_current_value()
+         
+@@ -444,14 +492,10 @@ class ContributePortfolioView(APIView):
+             if contribution_items:
+                 PortfolioContributionItem.objects.bulk_create(contribution_items)
+ 
+-            # ╨₧╨▒╨╜╨╛╨▓╨╗╤Å╨╡╨╝ ╤ü╤â╨╝╨╝╤â ╨▓╨╖╨╜╨╛╤ü╨░ ╨╕ initial_amount ╨┐╨╛╤Ç╤é╤ä╨╡╨╗╤Å
++            # ╨₧╨▒╨╜╨╛╨▓╨╗╤Å╨╡╨╝ ╤ü╤â╨╝╨╝╤â ╨▓╨╖╨╜╨╛╤ü╨░
+             contribution.amount = Decimal(str(round(total_value, 2)))
+             contribution.save(update_fields=['amount'])
+ 
+-            new_initial_amount = float(portfolio.initial_amount or 0) + total_value
+-            portfolio.initial_amount = Decimal(str(round(new_initial_amount, 2)))
+-            portfolio.save(update_fields=['initial_amount'])
+-
+             # ╨í╨╕╨╜╤à╤Ç╨╛╨╜╨╕╨╖╨░╤å╨╕╤Å: PortfolioAsset.units = ╬ú WalletHolding.units.
+             for sym in affected_symbols:
+                 WalletLedger.sync_aggregate(portfolio, sym)

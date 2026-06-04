@@ -18,6 +18,10 @@ from .views import (
     WalletDetailView,
     WalletTransferView,
     HoldingAdjustView,
+    # FiatCashFlow (PLAN11)
+    FiatCashFlowListCreateView,
+    FiatCashFlowDetailView,
+    PortfolioBaseCurrencyView,
     # Price views
     PricesView,
     PricesWithChangesView,
@@ -46,8 +50,11 @@ urlpatterns = [
         name='wallet_holding_adjust',
     ),
     path('wallets/<int:pk>/', WalletDetailView.as_view(), name='wallet_detail'),
+    path('cash-flows/', FiatCashFlowListCreateView.as_view(), name='fiat_cash_flow_list_create'),
+    path('cash-flows/<int:pk>/', FiatCashFlowDetailView.as_view(), name='fiat_cash_flow_detail'),
     path('top10/', Top10RecommendedView.as_view(), name='portfolio_top10'),
     path('import/', PortfolioImportView.as_view(), name='portfolio_import'),
+    path('<int:pk>/currency/', PortfolioBaseCurrencyView.as_view(), name='portfolio_base_currency'),
     path('<int:pk>/', PortfolioDetailView.as_view(), name='portfolio_detail'),
     
     # Price endpoints

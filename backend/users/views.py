@@ -55,16 +55,33 @@ class ProfileLookupView(APIView):
             analysis = None
 
             if portfolio:
-                # Используем PortfolioAnalyzer — учитывает реальные units, взносы (DCA) и выводы
+                analyzer = PortfolioAnalyzer(portfolio)
+                fiat = None
                 try:
-                    analyzer = PortfolioAnalyzer(portfolio)
-                    value_data = analyzer.get_current_value()
-                    drawdown_data = analyzer.get_drawdown()
-                    initial_value = value_data['initial_value']
-                    current_value = value_data['current_value']
-                    profit_loss = value_data['profit_loss']
-                    profit_loss_percent = value_data['profit_loss_percent']
-                    current_drawdown = drawdown_data['current_drawdown']
+                    fiat = analyzer.get_fiat_pnl()
+                except Exception as e:
+                    logger.warning("get_fiat_pnl failed in lookup: %s", e)
+
+                use_fiat_pnl = bool(fiat and not fiat.get('no_cash_in'))
+
+                # PLAN11: если есть FiatCashFlow — welcome/lookup показывает тот же
+                # P&L, что и dashboard («Финансы по фиату»), а не legacy
+                # initial_amount + Σ contributions (даёт фантомную просадку).
+                try:
+                    if use_fiat_pnl:
+                        initial_value = float(fiat['cash_in_total'])
+                        current_value = float(fiat['current_value'])
+                        profit_loss = float(fiat['profit_loss'])
+                        profit_loss_percent = float(fiat['profit_loss_percent'])
+                        current_drawdown = max(0.0, -profit_loss_percent)
+                    else:
+                        value_data = analyzer.get_current_value()
+                        drawdown_data = analyzer.get_drawdown()
+                        initial_value = value_data['initial_value']
+                        current_value = value_data['current_value']
+                        profit_loss = value_data['profit_loss']
+                        profit_loss_percent = value_data['profit_loss_percent']
+                        current_drawdown = drawdown_data['current_drawdown']
                 except Exception as e:
                     logger.warning("PortfolioAnalyzer failed in lookup: %s", e)
                     initial_value = float(portfolio.initial_amount or 0)
@@ -72,6 +89,8 @@ class ProfileLookupView(APIView):
                     profit_loss = 0
                     profit_loss_percent = 0
                     current_drawdown = 0
+                    use_fiat_pnl = False
+                    fiat = None
 
                 # Дней с момента создания (безопасно для date/datetime)
                 start_date = portfolio.start_date
@@ -90,7 +109,16 @@ class ProfileLookupView(APIView):
                     'profit_loss': round(profit_loss, 2),
                     'profit_loss_percent': round(profit_loss_percent, 2),
                     'days_active': days_active,
+                    'use_fiat_pnl': use_fiat_pnl,
                 }
+                if use_fiat_pnl and fiat:
+                    portfolio_data['currency'] = fiat['currency']
+                    portfolio_data['cash_in_total'] = round(
+                        float(fiat['cash_in_total']), 2
+                    )
+                    portfolio_data['net_cash_in'] = round(
+                        float(fiat['net_cash_in']), 2
+                    )
 
                 # Генерируем анализ
                 max_drawdown = getattr(profile, 'max_drawdown', 20) or 20

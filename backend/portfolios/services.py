@@ -256,6 +256,151 @@ class PriceService:
             logger.warning("Возвращаем запасные цены (fallback)")
             return {s: self.FALLBACK_PRICES.get(s, 0) for s in known_symbols}
     
+    def get_prices_in_currency(
+        self,
+        symbols: List[str],
+        currency: str = 'USD',
+        use_cache: bool = True,
+    ) -> Dict[str, float]:
+        """
+        Получить текущие цены активов в выбранной фиатной валюте.
+
+        Используется новой подсистемой `FiatCashFlow` / `get_fiat_pnl` (PLAN11).
+        Старый метод `get_prices` оставлен нетронутым — он по-прежнему отдаёт
+        USD-цены и используется в существующих расчётах/AI-промптах.
+
+        Args:
+            symbols: Список символов криптовалют (BTC, ETH, ...).
+            currency: 'USD' или 'EUR'. По умолчанию 'USD'.
+            use_cache: Использовать кэш (по умолчанию True).
+
+        Returns:
+            Словарь {символ: цена_в_currency}. Пустой dict, если все символы
+            неизвестны.
+        """
+        cur = (currency or 'USD').upper()
+        if cur not in ('USD', 'EUR'):
+            raise ValueError(
+                f"Неподдерживаемая валюта: {currency!r}. Допустимо: 'USD', 'EUR'."
+            )
+
+        known_symbols = [s.upper() for s in symbols if s.upper() in self.SYMBOL_TO_ID]
+        if not known_symbols:
+            return {}
+
+        cache_key = f"prices_{cur.lower()}:" + ",".join(sorted(known_symbols))
+
+        if use_cache:
+            cached = self.cache.get(cache_key)
+            if cached:
+                logger.debug(f"Цены ({cur}) получены из кэша: {cache_key}")
+                return cached
+
+        self.rate_limiter.wait_if_needed()
+
+        ids = [self.SYMBOL_TO_ID[s] for s in known_symbols]
+        ids_str = ",".join(ids)
+        cur_lower = cur.lower()
+
+        try:
+            response = requests.get(
+                f"{self.COINGECKO_URL}/simple/price",
+                params={
+                    "ids": ids_str,
+                    "vs_currencies": cur_lower,
+                },
+                timeout=10,
+            )
+
+            if response.status_code == 429:
+                self.rate_limiter.set_blocked(60)
+                raise requests.RequestException("Rate limited (429)")
+
+            response.raise_for_status()
+            data = response.json()
+
+            result: Dict[str, float] = {}
+            for coin_id, price_data in data.items():
+                symbol = self.ID_TO_SYMBOL.get(coin_id)
+                if symbol and cur_lower in price_data:
+                    result[symbol] = price_data[cur_lower]
+
+            # Для USD стейблкоины фиксируем как 1.0, если CoinGecko не отдал.
+            # Для EUR курс стейбла отличается от 1.0 — не подставляем.
+            if cur == 'USD':
+                for symbol in known_symbols:
+                    if symbol in ("USDT", "USDC") and symbol not in result:
+                        result[symbol] = 1.0
+
+            # EUR: если CoinGecko ничего не вернул — пробуем USD × FX.
+            if cur == 'EUR' and not result:
+                fx_fallback = self._eur_prices_via_usd_fx(known_symbols)
+                if fx_fallback:
+                    self.cache.set(f"{cache_key}:eur_via_fx_fallback", True)
+                    if use_cache:
+                        self.cache.set(cache_key, fx_fallback)
+                    logger.warning(
+                        "EUR-цены получены через USD × FX (CoinGecko ответил пусто)"
+                    )
+                    return fx_fallback
+
+            if use_cache and result:
+                self.cache.set(cache_key, result)
+
+            logger.info(
+                f"Цены ({cur}) успешно получены от CoinGecko: {list(result.keys())}"
+            )
+            return result
+
+        except requests.RequestException as e:
+            logger.error(f"Ошибка получения цен ({cur}): {e}")
+
+            stale_cached = self.cache.get_stale(cache_key)
+            if stale_cached:
+                logger.warning(f"Возвращаем устаревшие данные ({cur}) из кэша")
+                return stale_cached
+
+            # EUR: пробуем USD × FX как запасной путь
+            if cur == 'EUR':
+                fx_fallback = self._eur_prices_via_usd_fx(known_symbols)
+                if fx_fallback:
+                    self.cache.set(f"{cache_key}:eur_via_fx_fallback", True)
+                    logger.warning(
+                        "EUR-цены получены через USD × FX (после ошибки CoinGecko)"
+                    )
+                    return fx_fallback
+
+            logger.warning(f"Возвращаем запасные цены ({cur} fallback)")
+            return {s: self.FALLBACK_PRICES.get(s, 0) for s in known_symbols}
+
+    def _eur_prices_via_usd_fx(self, symbols: List[str]) -> Dict[str, float]:
+        """Получить EUR-цены через USD-цены и FX-курс USD→EUR.
+
+        FX-курс берём из `advisor.services._fx_rate` (см. A4). Если функция
+        ещё не реализована (порядок агентов) или FX недоступен — возвращаем
+        пустой словарь, чтобы вызывающая сторона откатилась на FALLBACK_PRICES.
+        """
+        try:
+            from advisor.services import _fx_rate  # type: ignore
+        except ImportError:
+            return {}
+
+        try:
+            fx_rate, _stale = _fx_rate('USD', 'EUR')
+            fx_float = float(fx_rate)
+        except Exception as e:  # noqa: BLE001 — широкий catch на стороннюю утилиту
+            logger.warning(f"_fx_rate USD→EUR недоступен: {e}")
+            return {}
+
+        if fx_float <= 0:
+            return {}
+
+        usd_prices = self.get_prices_in_currency(symbols, 'USD')
+        if not usd_prices:
+            return {}
+
+        return {sym: round(price * fx_float, 8) for sym, price in usd_prices.items()}
+
     def get_prices_with_changes(self, symbols: List[str]) -> Dict[str, Dict]:
         """
         Получить цены с изменениями за 24 часа.

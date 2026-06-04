@@ -8,6 +8,10 @@ import {
   type WalletUpdateInput,
   type WalletTransferInput,
   type HoldingAdjustInput,
+  type FiatCashFlow,
+  type FiatCashFlowKind,
+  type FiatCurrency,
+  type FiatPnl,
 } from '@/services/api'
 
 /** Преобразование ошибок валидации API в читаемую строку */
@@ -71,6 +75,12 @@ interface PortfolioValue {
   assets: Asset[]
   contributions?: Contribution[]
   withdrawals?: Withdrawal[]
+  /** PLAN11 — A6: новый блок P&L по фиатному учёту `FiatCashFlow`. */
+  fiat_pnl?: FiatPnl
+  /** PLAN11 — A6: базовая валюта портфеля (`USD`/`EUR`). */
+  base_currency?: FiatCurrency
+  /** Ручной курс USD→EUR для пересчета фиатного P&L. */
+  manual_usd_eur_rate?: number | string | null
 }
 
 interface InvestorProfile {
@@ -97,11 +107,23 @@ interface PortfolioState {
   isLoading: boolean
   error: string | null
   lastFetchTime: number  // Время последнего запроса для debounce
+
+  // --- PLAN11 (A8): фиатный учёт ---
+  /** Текущая базовая валюта портфеля на фронте (зеркало `portfolio.base_currency`). */
+  baseCurrency: FiatCurrency
+  /** Последний загруженный блок P&L по фиату (`null`, пока не запросили). */
+  fiatPnl: FiatPnl | null
+  /** Признак, что курс USD↔EUR на бэке протух (для иконки-warning). */
+  fxStale: boolean
+  /** Ручной курс USD→EUR, если пользователь задал его для портфеля. */
+  manualUsdEurRate: number | null
+  /** Список cash-flow'ов активного портфеля. */
+  fiatCashFlows: FiatCashFlow[]
   
   // Actions
   fetchProfile: () => Promise<void>
   createProfile: (data: Omit<InvestorProfile, 'id'>) => Promise<void>
-  fetchPortfolioValue: (force?: boolean) => Promise<void>
+  fetchPortfolioValue: (force?: boolean, currency?: FiatCurrency) => Promise<void>
   createPortfolio: (data: { name: string; initial_amount: number; target_years: number; experience_level?: string; needs_liquidity?: boolean }) => Promise<void>
   contribute: (amount: number) => Promise<void>
   contributeByUnits: (
@@ -141,6 +163,34 @@ interface PortfolioState {
     symbol: string,
     data: HoldingAdjustInput
   ) => Promise<void>
+  // --- PLAN11 (A8): cash-flow + смена базовой валюты ---
+  /** Перезагружает список фиатных операций активного портфеля. */
+  fetchFiatCashFlows: () => Promise<void>
+  /**
+   * Создаёт `FiatCashFlow` через API и обновляет
+   * `fiatCashFlows` + `portfolioValue.fiat_pnl` в одном проходе.
+   * Возвращает созданную запись (с возможным `fx_stale` от бэка).
+   */
+  createFiatCashFlow: (input: {
+    kind: FiatCashFlowKind
+    amount: number
+    currency: FiatCurrency
+    occurred_on?: string
+    note?: string
+  }) => Promise<FiatCashFlow & { fx_stale?: boolean }>
+  /** Удаляет cash-flow и пересчитывает блок «Финансы по фиату». */
+  deleteFiatCashFlow: (id: number) => Promise<void>
+  /**
+   * Меняет базовую валюту портфеля и сразу обновляет dashboard:
+   * бэкенд внутри транзакции пересчитывает `fx_rate_to_base` у всех
+   * существующих cash-flow'ов (PLAN11 — A6).
+   */
+  setBaseCurrency: (
+    currency: FiatCurrency,
+    manualUsdEurRate?: number | null
+  ) => Promise<void>
+  /** Сохраняет ручной курс USD→EUR через тот же endpoint currency/. */
+  setManualUsdEurRate: (rate: number | null) => Promise<void>
   clearError: () => void
 }
 
@@ -162,6 +212,13 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
   isLoading: false,
   error: null,
   lastFetchTime: 0,
+
+  // PLAN11 (A8): фиатный учёт
+  baseCurrency: 'USD',
+  fiatPnl: null,
+  fxStale: false,
+  manualUsdEurRate: null,
+  fiatCashFlows: [],
   
   fetchProfile: async () => {
     // Защита от параллельных запросов
@@ -207,14 +264,17 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
     }
   },
   
-  fetchPortfolioValue: async (force = false) => {
+  fetchPortfolioValue: async (force = false, currency?: FiatCurrency) => {
     // Защита от параллельных запросов
     if (isFetchingPortfolio) {
       console.log('fetchPortfolioValue: уже выполняется запрос, пропускаем')
       return
     }
     
-    // Debounce: не запрашиваем чаще чем раз в 30 секунд (если не force)
+    // Debounce: не запрашиваем чаще чем раз в 30 секунд (если не force).
+    // Смена валюты — это «принудительная» операция, она тоже выставит
+    // force=true в вызывающем коде (см. `setBaseCurrency` и переключатель
+    // USD/EUR на dashboard'е).
     const state = get()
     const now = Date.now()
     if (!force && state.lastFetchTime && (now - state.lastFetchTime) < MIN_FETCH_INTERVAL) {
@@ -224,10 +284,23 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
     
     isFetchingPortfolio = true
     set({ isLoading: true, error: null, lastFetchTime: now })
-    
+
     try {
-      const value = await portfolioApi.getValue()
-      set({ portfolioValue: value, hasPortfolio: true, isLoading: false })
+      // Используем типизированный `getPortfolioValue` из PLAN11 — он
+      // умеет принимать `?currency=` и возвращает `fiat_pnl` + `base_currency`.
+      const value = await portfolioApi.getPortfolioValue(currency)
+      set({
+        portfolioValue: value as unknown as PortfolioValue,
+        hasPortfolio: true,
+        isLoading: false,
+        fiatPnl: value.fiat_pnl ?? null,
+        baseCurrency: value.base_currency ?? get().baseCurrency,
+        fxStale: Boolean(value.fiat_pnl?.fx_stale),
+        manualUsdEurRate:
+          value.manual_usd_eur_rate == null
+            ? null
+            : Number(value.manual_usd_eur_rate),
+      })
     } catch (error: any) {
       if (error.response?.status === 404) {
         set({ hasPortfolio: false, isLoading: false })
@@ -482,6 +555,132 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
       set({ error: message, isLoading: false })
       throw error
     }
+  },
+
+  // --- PLAN11 (A8): cash-flow + base_currency ---
+
+  fetchFiatCashFlows: async () => {
+    try {
+      const { items } = await portfolioApi.listFiatCashFlows()
+      set({ fiatCashFlows: items })
+    } catch (error: any) {
+      // 404 = нет активного портфеля; пустой список — норма.
+      if (error?.response?.status === 404) {
+        set({ fiatCashFlows: [] })
+        return
+      }
+      const message = formatApiError(error, 'Ошибка загрузки фиатных операций')
+      set({ error: message })
+    }
+  },
+
+  createFiatCashFlow: async (input) => {
+    set({ error: null })
+    try {
+      const created = await portfolioApi.createFiatCashFlow(input)
+      const currency = get().baseCurrency
+      // После создания cash-flow обновляем и список, и блок P&L: бэк
+      // пересчитал `fiat_pnl.cash_in_total` / `current_value`, фронту
+      // нельзя считать это самому (нужны актуальные крипто-цены).
+      const [list, value] = await Promise.all([
+        portfolioApi.listFiatCashFlows().catch(() => ({ items: get().fiatCashFlows })),
+        portfolioApi
+          .getPortfolioValue(currency)
+          .catch(() => null),
+      ])
+      set({
+        fiatCashFlows: list.items,
+        portfolioValue:
+          value ? (value as unknown as PortfolioValue) : get().portfolioValue,
+        fiatPnl: value?.fiat_pnl ?? get().fiatPnl,
+        baseCurrency: value?.base_currency ?? get().baseCurrency,
+        fxStale: Boolean(value?.fiat_pnl?.fx_stale ?? get().fxStale),
+        manualUsdEurRate: value
+          ? value.manual_usd_eur_rate == null
+            ? null
+            : Number(value.manual_usd_eur_rate)
+          : get().manualUsdEurRate,
+        lastFetchTime: Date.now(),
+      })
+      return created
+    } catch (error: any) {
+      const message = formatApiError(error, 'Не удалось сохранить фиатную операцию')
+      set({ error: message })
+      throw error
+    }
+  },
+
+  deleteFiatCashFlow: async (id: number) => {
+    set({ error: null })
+    try {
+      await portfolioApi.deleteFiatCashFlow(id)
+      const currency = get().baseCurrency
+      const [list, value] = await Promise.all([
+        portfolioApi.listFiatCashFlows().catch(() => ({ items: get().fiatCashFlows.filter((f) => f.id !== id) })),
+        portfolioApi
+          .getPortfolioValue(currency)
+          .catch(() => null),
+      ])
+      set({
+        fiatCashFlows: list.items,
+        portfolioValue:
+          value ? (value as unknown as PortfolioValue) : get().portfolioValue,
+        fiatPnl: value?.fiat_pnl ?? get().fiatPnl,
+        baseCurrency: value?.base_currency ?? get().baseCurrency,
+        fxStale: Boolean(value?.fiat_pnl?.fx_stale ?? get().fxStale),
+        manualUsdEurRate: value
+          ? value.manual_usd_eur_rate == null
+            ? null
+            : Number(value.manual_usd_eur_rate)
+          : get().manualUsdEurRate,
+        lastFetchTime: Date.now(),
+      })
+    } catch (error: any) {
+      const message = formatApiError(error, 'Не удалось удалить операцию')
+      set({ error: message })
+      throw error
+    }
+  },
+
+  setBaseCurrency: async (currency: FiatCurrency, manualUsdEurRate?: number | null) => {
+    const prev = get().baseCurrency
+    if (prev === currency && manualUsdEurRate === undefined) return
+    set({ error: null })
+    try {
+      const portfolioId = get().portfolioValue?.portfolio_id
+      if (!portfolioId) {
+        throw new Error('Нет активного портфеля для смены базовой валюты')
+      }
+      const resp = await portfolioApi.setBaseCurrency(
+        portfolioId,
+        currency,
+        manualUsdEurRate
+      )
+      // После PATCH `currency/` нужно перетянуть value с новой валютой,
+      // чтобы блок «Финансы по фиату» сразу пересчитался.
+      const value = await portfolioApi
+        .getPortfolioValue(resp.base_currency)
+        .catch(() => null)
+      set({
+        baseCurrency: resp.base_currency,
+        fxStale: Boolean(resp.fx_stale || value?.fiat_pnl?.fx_stale),
+        portfolioValue:
+          value ? (value as unknown as PortfolioValue) : get().portfolioValue,
+        fiatPnl: value?.fiat_pnl ?? get().fiatPnl,
+        manualUsdEurRate: resp.manual_usd_eur_rate,
+        lastFetchTime: Date.now(),
+      })
+      // FX у cash-flow'ов изменился — обновим и список.
+      await get().fetchFiatCashFlows()
+    } catch (error: any) {
+      const message = formatApiError(error, 'Не удалось сменить базовую валюту')
+      set({ error: message })
+      throw error
+    }
+  },
+
+  setManualUsdEurRate: async (rate: number | null) => {
+    await get().setBaseCurrency(get().baseCurrency, rate)
   },
 
   clearError: () => set({ error: null }),

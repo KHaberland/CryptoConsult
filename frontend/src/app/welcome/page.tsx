@@ -28,6 +28,11 @@ interface PortfolioData {
   profit_loss: number
   profit_loss_percent: number
   days_active: number
+  /** PLAN11: true — метрики из FiatCashFlow (как на dashboard) */
+  use_fiat_pnl?: boolean
+  currency?: 'USD' | 'EUR'
+  cash_in_total?: number
+  net_cash_in?: number
 }
 
 interface Analysis {
@@ -125,6 +130,14 @@ function WelcomeContent() {
     }
   }
   
+  const fiatCurrency = (portfolio?.currency ?? 'USD') as 'USD' | 'EUR'
+  const investedLabel = portfolio?.use_fiat_pnl
+    ? 'Введено наличных'
+    : 'Начальная стоимость'
+  const investedAmount = portfolio?.use_fiat_pnl
+    ? (portfolio.cash_in_total ?? portfolio.initial_value)
+    : portfolio?.initial_value
+
   if (isLoading || !isReady) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-primary-50 to-white flex items-center justify-center">
@@ -170,8 +183,18 @@ function WelcomeContent() {
                 <div className="flex items-center">
                   <DollarSign className="w-5 h-5 text-gray-400 mr-2" />
                   <div>
-                    <p className="text-xs text-gray-500">Начальная стоимость</p>
-                    <p className="font-medium">{formatCurrency(portfolio.initial_value)}</p>
+                    <p className="text-xs text-gray-500">{investedLabel}</p>
+                    <p className="font-medium">
+                      {formatCurrency(investedAmount ?? 0, fiatCurrency)}
+                    </p>
+                    {portfolio.use_fiat_pnl &&
+                      portfolio.net_cash_in != null &&
+                      portfolio.net_cash_in !== portfolio.cash_in_total && (
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Чистый завод:{' '}
+                          {formatCurrency(portfolio.net_cash_in, fiatCurrency)}
+                        </p>
+                      )}
                   </div>
                 </div>
               </div>
@@ -180,7 +203,7 @@ function WelcomeContent() {
               <div className="bg-gray-50 rounded-lg p-4 mb-6">
                 <p className="text-sm text-gray-500 mb-1">Текущая стоимость</p>
                 <p className="text-3xl font-bold text-gray-900">
-                  {formatCurrency(portfolio.current_value)}
+                  {formatCurrency(portfolio.current_value, fiatCurrency)}
                 </p>
                 <div className={`flex items-center mt-2 ${portfolio.profit_loss >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                   {portfolio.profit_loss >= 0 ? (
@@ -189,9 +212,15 @@ function WelcomeContent() {
                     <TrendingDown className="w-4 h-4 mr-1" />
                   )}
                   <span className="font-medium">
-                    {formatCurrency(portfolio.profit_loss)} ({formatPercent(portfolio.profit_loss_percent)})
+                    {formatCurrency(portfolio.profit_loss, fiatCurrency)}{' '}
+                    ({formatPercent(portfolio.profit_loss_percent)})
                   </span>
                 </div>
+                {portfolio.use_fiat_pnl && (
+                  <p className="text-xs text-gray-500 mt-2">
+                    P&L по фиатному учёту (как на дашборде)
+                  </p>
+                )}
               </div>
               
               {/* Блок анализа */}

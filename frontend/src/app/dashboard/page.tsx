@@ -18,8 +18,13 @@ import { WalletsSection } from '@/components/portfolio/WalletsSection'
 import { AdjustHoldingModal } from '@/components/portfolio/AdjustHoldingModal'
 import { ForecastModal } from '@/components/forecast/ForecastModal'
 import { BtcAnalysisModal } from '@/components/forecast/BtcAnalysisModal'
+import { FiatCashFlowModal } from '@/components/portfolio/FiatCashFlowModal'
 import { chatApi, versionApi } from '@/services/api'
-import type { Wallet as WalletType, WalletHolding } from '@/services/api'
+import type {
+  Wallet as WalletType,
+  WalletHolding,
+  FiatCashFlowKind,
+} from '@/services/api'
 import { formatCurrency, formatPercent, formatDate, formatUnits } from '@/lib/utils'
 import {
   TrendingUp,
@@ -36,6 +41,10 @@ import {
   ArrowLeftRight,
   Info,
   Pencil,
+  Trash2,
+  ChevronDown,
+  ChevronUp,
+  Banknote,
 } from 'lucide-react'
 import { getDcaEntriesWithCumulative } from '@/lib/dca'
 
@@ -49,6 +58,12 @@ export default function DashboardPage() {
   const [showForecastModal, setShowForecastModal] = useState(false)
   const [showBtcAnalysisModal, setShowBtcAnalysisModal] = useState(false)
   const [usdcInfoDismissed, setUsdcInfoDismissed] = useState<boolean>(true)
+  const [usdEurRateInput, setUsdEurRateInput] = useState('')
+  const [usdEurRateSaving, setUsdEurRateSaving] = useState(false)
+  const [usdEurRateError, setUsdEurRateError] = useState<string | null>(null)
+  // PLAN11 (A8): модалка фиат-операций + флаги UI для блока «Финансы по фиату».
+  const [fiatModalMode, setFiatModalMode] = useState<FiatCashFlowKind | null>(null)
+  const [showFiatCashFlows, setShowFiatCashFlows] = useState<boolean>(false)
   const [adjustTarget, setAdjustTarget] = useState<{
     wallet: WalletType
     holding: WalletHolding
@@ -86,12 +101,27 @@ export default function DashboardPage() {
     swap,
     wallets,
     adjustHolding,
+    baseCurrency,
+    fiatPnl,
+    fxStale,
+    manualUsdEurRate,
+    fiatCashFlows,
+    fetchFiatCashFlows,
+    createFiatCashFlow,
+    deleteFiatCashFlow,
+    setBaseCurrency,
   } = usePortfolioStore()
   
   // Инициализация сессии
   useEffect(() => {
     initSession()
   }, [initSession])
+
+  useEffect(() => {
+    setUsdEurRateInput(
+      manualUsdEurRate == null ? '' : String(manualUsdEurRate)
+    )
+  }, [manualUsdEurRate])
   
   // Загрузка данных после инициализации сессии
   useEffect(() => {
@@ -100,6 +130,15 @@ export default function DashboardPage() {
       fetchPortfolioValue()
     }
   }, [isReady, fetchProfile, fetchPortfolioValue])
+
+  // PLAN11 (A8): подгружаем список фиатных операций один раз после
+  // готовности сессии. Дальше он живёт в сторе и обновляется на
+  // create/delete (PortfolioStore.createFiatCashFlow / deleteFiatCashFlow).
+  useEffect(() => {
+    if (isReady && hasPortfolio) {
+      fetchFiatCashFlows()
+    }
+  }, [isReady, hasPortfolio, fetchFiatCashFlows])
 
   // Проверка наличия API ключа
   useEffect(() => {
@@ -138,7 +177,51 @@ export default function DashboardPage() {
   }, [hasPortfolio, hasProfile, isLoading, isReady, router])
   
   const handleRefresh = () => {
-    fetchPortfolioValue(true) // force = true для ручного обновления
+    fetchPortfolioValue(true, baseCurrency) // force = true для ручного обновления
+  }
+
+  // PLAN11 (A8): переключение базовой валюты USD/EUR. Сначала PATCH на
+  // бэке (пересчитывает FX у cash-flow'ов), затем перерисовка dashboard.
+  const handleSwitchCurrency = async (cur: 'USD' | 'EUR') => {
+    if (cur === baseCurrency) return
+    try {
+      await setBaseCurrency(cur)
+    } catch {
+      // ошибка уже сохранена в store.error
+    }
+  }
+
+  const handleSaveUsdEurRate = async () => {
+    const normalized = usdEurRateInput.trim().replace(',', '.')
+    const rate = parseFloat(normalized)
+    if (!Number.isFinite(rate) || rate <= 0) {
+      setUsdEurRateError('Введите курс USD→EUR больше нуля')
+      return
+    }
+
+    setUsdEurRateSaving(true)
+    setUsdEurRateError(null)
+    try {
+      await setBaseCurrency('EUR', rate)
+    } catch {
+      // ошибка уже сохранена в store.error
+    } finally {
+      setUsdEurRateSaving(false)
+    }
+  }
+
+  // PLAN11 (A8): удаление cash-flow с подтверждением. Используем
+  // нативный confirm() — это минимально допустимое UX-решение из спека.
+  const handleDeleteCashFlow = async (id: number) => {
+    if (typeof window !== 'undefined') {
+      const ok = window.confirm('Удалить эту фиатную операцию? Действие необратимо.')
+      if (!ok) return
+    }
+    try {
+      await deleteFiatCashFlow(id)
+    } catch {
+      // ошибка уже сохранена в store.error
+    }
   }
 
   const handleForecastClick = async (days: number) => {
@@ -212,9 +295,6 @@ export default function DashboardPage() {
 
   const displayAssets = portfolioValue.assets
   const displayTotalValue = portfolioValue.total_value
-  const displayProfitLoss = portfolioValue.profit_loss
-  const displayProfitLossPercent = portfolioValue.profit_loss_percent
-  const isProfit = portfolioValue.profit_loss >= 0
 
   // Активы вне ТОП-10 (для импортированных портфелей).
   const allNonRecommendedAssets = portfolioValue.assets.filter(
@@ -312,6 +392,27 @@ export default function DashboardPage() {
   const hasUsdc = !!usdcAsset
   const hasNonRecommended = nonRecommendedAssets.length > 0
 
+  // --- PLAN11 (A8): данные для блока «Финансы по фиату» ---
+  // Берём из стора актуальную базовую валюту и P&L по фиатному учёту.
+  // Если cash-flow'ов ещё нет — `fiat_pnl.no_cash_in === true` и блок
+  // показывает CTA «Введите сумму…», а не нули.
+  const fiatCurrency = (fiatPnl?.currency ?? baseCurrency) as 'USD' | 'EUR'
+  const fiatNoCashIn = fiatPnl?.no_cash_in ?? true
+  const fiatProfit = fiatPnl?.profit_loss ?? 0
+  const fiatProfitPercent = fiatPnl?.profit_loss_percent ?? 0
+  const fiatIsProfit = fiatProfit >= 0
+  const effectiveUsdEurRate = manualUsdEurRate ?? (
+    fiatCurrency === 'EUR' && displayTotalValue > 0 && fiatPnl?.current_value
+      ? fiatPnl.current_value / displayTotalValue
+      : null
+  )
+  const displayTotalValueEur = effectiveUsdEurRate
+    ? displayTotalValue * effectiveUsdEurRate
+    : fiatCurrency === 'EUR'
+      ? fiatPnl?.current_value ?? null
+      : null
+  const recentFiatCashFlows = fiatCashFlows.slice(0, 5)
+
   return (
     <div className="min-h-screen bg-gray-50">
       <Header />
@@ -383,6 +484,281 @@ export default function DashboardPage() {
           </div>
         )}
         
+        {/* PLAN11 (A8): главный блок «Финансы по фиату» — заметнее
+            старого расчёта от Portfolio.initial_amount, показывается всегда
+            (CTA при отсутствии cash-flow'ов). */}
+        <Card className="mb-6">
+          <CardHeader className="flex flex-row items-center justify-between flex-wrap gap-2">
+            <CardTitle className="flex items-center gap-2">
+              <Banknote className="w-5 h-5 text-primary-600" />
+              Финансы по фиату
+              {fxStale && (
+                <span
+                  className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800"
+                  title="Курс USD↔EUR временно недоступен; расчёт идёт по курсу 1.0"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  FX недоступен
+                </span>
+              )}
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor="usd-eur-rate"
+                  className="text-xs text-gray-600 whitespace-nowrap"
+                >
+                  Курс USD→EUR
+                </label>
+                <input
+                  id="usd-eur-rate"
+                  type="number"
+                  min="0"
+                  step="0.000001"
+                  value={usdEurRateInput}
+                  onChange={(e) => {
+                    setUsdEurRateInput(e.target.value)
+                    setUsdEurRateError(null)
+                  }}
+                  placeholder="0.92"
+                  className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm tabular-nums focus:border-primary-500 focus:ring-1 focus:ring-primary-500"
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleSaveUsdEurRate}
+                  disabled={usdEurRateSaving}
+                >
+                  {usdEurRateSaving ? '...' : 'Сохранить'}
+                </Button>
+              </div>
+              <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                {(['USD', 'EUR'] as const).map((cur) => {
+                  const active = fiatCurrency === cur
+                  return (
+                    <button
+                      key={cur}
+                      type="button"
+                      onClick={() => handleSwitchCurrency(cur)}
+                      className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
+                        active
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-600 hover:text-gray-900'
+                      }`}
+                      aria-pressed={active}
+                    >
+                      {cur}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {usdEurRateError && (
+              <Alert variant="warning" className="mb-4">
+                {usdEurRateError}
+              </Alert>
+            )}
+            {fiatNoCashIn ? (
+              // CTA — пользователь ещё не зафиксировал ни одного депозита.
+              <div className="rounded-lg border border-dashed border-primary-300 bg-primary-50/40 p-4">
+                <div className="flex items-start gap-3">
+                  <Info className="w-5 h-5 mt-0.5 text-primary-600 shrink-0" />
+                  <div className="flex-1">
+                    <p className="font-medium text-gray-900 mb-1">
+                      Введите сумму, которую вы завели на свои кошельки или
+                      биржу
+                    </p>
+                    <p className="text-sm text-gray-600 mb-3">
+                      От этой суммы будет считаться прибыль/убыток всего
+                      портфеля. Учёт ведётся отдельно от плана DCA и
+                      кошельковых остатков.
+                    </p>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => setFiatModalMode('deposit')}
+                    >
+                      <PlusCircle className="w-4 h-4 mr-1" />
+                      Внести фиат
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <p className="text-sm text-gray-600">Введено наличных</p>
+                    <p className="text-2xl font-bold text-gray-900 tabular-nums">
+                      {formatCurrency(fiatPnl?.cash_in_total ?? 0, fiatCurrency)}
+                    </p>
+                    {fiatPnl && fiatPnl.cash_out_total > 0 && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        Выведено: {formatCurrency(fiatPnl.cash_out_total, fiatCurrency)}{' · '}
+                        Чистый завод: {formatCurrency(fiatPnl.net_cash_in, fiatCurrency)}
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600">Текущая стоимость</p>
+                    <p className="text-2xl font-bold text-gray-900 tabular-nums">
+                      {formatCurrency(displayTotalValue)}
+                    </p>
+                    {displayTotalValueEur != null ? (
+                      <p className="text-xs text-gray-500 mt-1">
+                        ≈ {formatCurrency(displayTotalValueEur, 'EUR')}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-gray-500 mt-1">
+                        Введите курс USD→EUR, чтобы увидеть сумму в евро
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600">Прибыль / Убыток</p>
+                    <div className="flex items-center">
+                      {fiatIsProfit ? (
+                        <TrendingUp className="w-6 h-6 text-green-500 mr-2" />
+                      ) : (
+                        <TrendingDown className="w-6 h-6 text-red-500 mr-2" />
+                      )}
+                      <span
+                        className={`text-2xl font-bold tabular-nums ${
+                          fiatIsProfit ? 'text-green-600' : 'text-red-600'
+                        }`}
+                      >
+                        {formatCurrency(fiatProfit, fiatCurrency)}
+                      </span>
+                    </div>
+                    <p
+                      className={`text-sm mt-1 ${
+                        fiatIsProfit ? 'text-green-600' : 'text-red-600'
+                      }`}
+                    >
+                      ({formatPercent(fiatProfitPercent)})
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2 mt-5">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => setFiatModalMode('deposit')}
+                  >
+                    <PlusCircle className="w-4 h-4 mr-1" />
+                    Внести фиат
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setFiatModalMode('withdrawal')}
+                  >
+                    <Wallet className="w-4 h-4 mr-1" />
+                    Снять фиат
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {/* Список последних cash-flow'ов — складывается под кнопкой */}
+            {fiatCashFlows.length > 0 && (
+              <div className="mt-5 pt-4 border-t border-gray-200">
+                <button
+                  type="button"
+                  onClick={() => setShowFiatCashFlows((v) => !v)}
+                  className="flex items-center gap-1 text-sm font-medium text-gray-700 hover:text-gray-900"
+                >
+                  {showFiatCashFlows ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                  Последние операции ({fiatCashFlows.length})
+                </button>
+                {showFiatCashFlows && (
+                  <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-gray-50 border-b border-gray-200">
+                          <th className="px-3 py-2 text-left font-medium text-gray-700">Дата</th>
+                          <th className="px-3 py-2 text-left font-medium text-gray-700">Тип</th>
+                          <th className="px-3 py-2 text-right font-medium text-gray-700">Сумма</th>
+                          <th className="px-3 py-2 text-left font-medium text-gray-700">Заметка</th>
+                          <th className="px-3 py-2 text-right font-medium text-gray-700 w-10" aria-label="Действия" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recentFiatCashFlows.map((flow) => {
+                          const isDeposit = flow.kind === 'deposit'
+                          const amountNum =
+                            typeof flow.amount === 'number'
+                              ? flow.amount
+                              : parseFloat(String(flow.amount))
+                          return (
+                            <tr
+                              key={flow.id}
+                              className="border-b border-gray-100 last:border-0"
+                            >
+                              <td className="px-3 py-2 text-gray-700 whitespace-nowrap">
+                                {formatDate(flow.occurred_on)}
+                              </td>
+                              <td className="px-3 py-2">
+                                <span
+                                  className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${
+                                    isDeposit
+                                      ? 'bg-green-100 text-green-700'
+                                      : 'bg-orange-100 text-orange-700'
+                                  }`}
+                                >
+                                  {isDeposit ? (
+                                    <PlusCircle className="w-3 h-3" />
+                                  ) : (
+                                    <Wallet className="w-3 h-3" />
+                                  )}
+                                  {isDeposit ? 'Депозит' : 'Вывод'}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-right font-medium text-gray-900 tabular-nums whitespace-nowrap">
+                                {formatCurrency(
+                                  Number.isFinite(amountNum) ? amountNum : 0,
+                                  flow.currency,
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-gray-600 max-w-[240px] truncate" title={flow.note || undefined}>
+                                {flow.note || <span className="text-gray-400">—</span>}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteCashFlow(flow.id)}
+                                  className="p-1 rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
+                                  aria-label="Удалить операцию"
+                                  title="Удалить операцию"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                    {fiatCashFlows.length > recentFiatCashFlows.length && (
+                      <div className="px-3 py-2 text-xs text-gray-500 bg-gray-50 border-t border-gray-200">
+                        Показаны последние {recentFiatCashFlows.length} из{' '}
+                        {fiatCashFlows.length} операций.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Portfolio Summary */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
           {/* Total Value Card */}
@@ -395,38 +771,21 @@ export default function DashboardPage() {
               </Button>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-2 gap-6">
-                <div>
-                  <p className="text-sm text-gray-600">Текущая стоимость</p>
-                  <p className="text-3xl font-bold text-gray-900">
-                    {formatCurrency(displayTotalValue)}
-                  </p>
-                  {(showDcaBreakdown || totalInvestment > investedSoFar) && (
-                    <p className="text-sm text-gray-500 mt-1">
-                      Вложено: {formatCurrency(investedSoFar)}
-                      {totalInvestment > 0 && ` из ${formatCurrency(totalInvestment)}`}
-                    </p>
-                  )}
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Прибыль / Убыток</p>
-                  <div className="flex items-center">
-                    {isProfit ? (
-                      <TrendingUp className="w-6 h-6 text-green-500 mr-2" />
-                    ) : (
-                      <TrendingDown className="w-6 h-6 text-red-500 mr-2" />
-                    )}
-                    <span className={`text-2xl font-bold ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
-                      {formatCurrency(displayProfitLoss)}
-                    </span>
-                    <span className={`ml-2 text-lg ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
-                      ({formatPercent(displayProfitLossPercent)})
-                    </span>
-                  </div>
+              {/* PLAN12: legacy-блок «Прибыль/убыток от Portfolio.initial_amount»
+                  убран — он давал фантомную просадку при зеркальных
+                  парах PortfolioContribution+HoldingAdjustment.
+                  Главный P&L теперь — в блоке «Финансы по фиату» наверху. */}
+              <div>
+                <p className="text-sm text-gray-600">Текущая стоимость</p>
+                <p className="text-3xl font-bold text-gray-900">
+                  {formatCurrency(displayTotalValue)}
+                </p>
+                {(showDcaBreakdown || totalInvestment > investedSoFar) && (
                   <p className="text-sm text-gray-500 mt-1">
-                    Стоимость: {formatCurrency(displayTotalValue)}
+                    Вложено по плану DCA: {formatCurrency(investedSoFar)}
+                    {totalInvestment > 0 && ` из ${formatCurrency(totalInvestment)}`}
                   </p>
-                </div>
+                )}
               </div>
 
               {/* Разбивка по датам входа (DCA) */}
@@ -877,6 +1236,17 @@ export default function DashboardPage() {
         onConfirm={adjustHolding}
         wallet={adjustTarget?.wallet ?? null}
         holding={adjustTarget?.holding ?? null}
+      />
+      {/* PLAN11 (A8): модалка ввода/вывода фиата. Открывается из блока
+          «Финансы по фиату»; режим определяется кнопкой («Внести» / «Снять»). */}
+      <FiatCashFlowModal
+        isOpen={fiatModalMode !== null}
+        onClose={() => setFiatModalMode(null)}
+        mode={fiatModalMode ?? 'deposit'}
+        defaultCurrency={fiatCurrency}
+        onSubmit={async (input) => {
+          return createFiatCashFlow(input)
+        }}
       />
     </div>
   )

@@ -118,6 +118,114 @@ export const profileApi = {
 
 // ============ Portfolio API ============
 
+// --- PLAN11: фиатный учёт (FiatCashFlow + base_currency + P&L по фиату) ---
+
+/** Базовая валюта портфеля / валюта фиатной операции (PLAN11). */
+export type FiatCurrency = 'USD' | 'EUR'
+
+/** Тип фиатного движения средств: внесение или вывод (PLAN11). */
+export type FiatCashFlowKind = 'deposit' | 'withdrawal'
+
+/**
+ * Фиатное движение средств по портфелю (PLAN11 — A1/A5).
+ *
+ * Хранится отдельно от `Portfolio.initial_amount` / `PortfolioContribution` /
+ * `PortfolioWithdrawal`: эта подсистема используется ТОЛЬКО для расчёта
+ * P&L на dashboard и не привязана к конкретному `Wallet`.
+ *
+ * Числовые поля бэк отдаёт как Decimal-строки или числа в зависимости от
+ * сериализатора, поэтому допускаем оба варианта.
+ */
+export interface FiatCashFlow {
+  id: number
+  kind: FiatCashFlowKind
+  amount: number | string
+  currency: FiatCurrency
+  fx_rate_to_base: number | string
+  amount_in_base: number
+  occurred_on: string
+  note: string
+  created_at: string
+}
+
+/**
+ * Расчёт P&L портфеля по фиатному учёту (PLAN11 — A4/A6).
+ *
+ * Все суммы — в `currency`. `no_cash_in === true` означает, что у пользователя
+ * ещё нет ни одного депозита — на dashboard в этом случае показываем CTA,
+ * а не нули. `fx_stale === true` сигнализирует о том, что FX USD↔EUR не
+ * удалось получить и расчёт сделан по курсу 1.0 (см. PLAN11 §A4).
+ */
+export interface FiatPnl {
+  currency: FiatCurrency
+  cash_in_total: number
+  cash_out_total: number
+  net_cash_in: number
+  current_value: number
+  profit_loss: number
+  profit_loss_percent: number
+  no_cash_in: boolean
+  fx_stale: boolean
+}
+
+/** Актив портфеля в ответе `GET /api/portfolio/value/`. */
+export interface PortfolioValueAsset {
+  symbol: string
+  name: string
+  percentage: number
+  units: number
+  initial_value: number
+  current_value: number
+  current_price: number
+  change_24h: number
+  profit_loss: number
+  profit_loss_percent: number
+  is_recommended?: boolean
+}
+
+/** Запись истории взносов (`PortfolioContribution`). */
+export interface PortfolioValueContribution {
+  id: number
+  amount: number
+  contributed_at: string
+}
+
+/** Запись истории выводов (`PortfolioWithdrawal`). */
+export interface PortfolioValueWithdrawal {
+  id: number
+  amount: number
+  withdrawn_at: string
+}
+
+/**
+ * Ответ `GET /api/portfolio/value/[?currency=USD|EUR]` (PLAN11 — A6).
+ *
+ * Старые поля (`total_value`, `initial_value`, `profit_loss`,
+ * `profit_loss_percent`) сохранены для обратной совместимости — это
+ * legacy-расчёт от `Portfolio.initial_amount + Σ contributions`. Новый блок
+ * `fiat_pnl` считается по `FiatCashFlow` и должен использоваться в новом
+ * dashboard-блоке «Финансы по фиату».
+ */
+export interface PortfolioValue {
+  portfolio_id: number
+  portfolio_name: string
+  total_value: number
+  initial_value: number
+  profit_loss: number
+  profit_loss_percent: number
+  start_date: string
+  target_date: string
+  target_years: number
+  days_active: number
+  days_remaining: number
+  assets: PortfolioValueAsset[]
+  contributions?: PortfolioValueContribution[]
+  withdrawals?: PortfolioValueWithdrawal[]
+  fiat_pnl?: FiatPnl
+  base_currency?: FiatCurrency
+  manual_usd_eur_rate?: number | string | null
+}
+
 export const portfolioApi = {
   list: async () => {
     const response = await api.get('/portfolio/')
@@ -323,6 +431,100 @@ export const portfolioApi = {
         profit_loss_percent: number
       }
     }
+  },
+
+  // --- PLAN11: FiatCashFlow + base_currency + типизированный getValue ---
+
+  /**
+   * Типизированный `GET /api/portfolio/value/[?currency=USD|EUR]`.
+   *
+   * Если `currency` не передан — бэкенд использует `portfolio.base_currency`.
+   * Старые поля (`total_value`, `initial_value`, `profit_loss`,
+   * `profit_loss_percent`) остаются для обратной совместимости; новый блок
+   * `fiat_pnl` считается по `FiatCashFlow`.
+   */
+  getPortfolioValue: async (
+    currency?: FiatCurrency
+  ): Promise<PortfolioValue> => {
+    const params = currency ? { currency } : undefined
+    const response = await api.get<PortfolioValue>('/portfolio/value/', { params })
+    return response.data
+  },
+
+  /**
+   * `GET /api/portfolio/cash-flows/[?kind=...&currency=...]`.
+   *
+   * Пагинации нет (PLAN11 — A5): эндпоинт всегда отдаёт полный список
+   * cash-flow'ов активного портфеля в виде `{items, count}`.
+   */
+  listFiatCashFlows: async (params?: {
+    kind?: FiatCashFlowKind
+    currency?: FiatCurrency
+  }): Promise<{ items: FiatCashFlow[] }> => {
+    const response = await api.get<{ items: FiatCashFlow[]; count?: number }>(
+      '/portfolio/cash-flows/',
+      { params }
+    )
+    return { items: response.data.items }
+  },
+
+  /**
+   * `POST /api/portfolio/cash-flows/`.
+   *
+   * `fx_rate_to_base` рассчитывается на сервере. Если внешний FX-источник
+   * недоступен, в ответе придёт `fx_stale: true` — это нужно показать
+   * пользователю как маленькое предупреждение (PLAN11 — A5/A8).
+   */
+  createFiatCashFlow: async (input: {
+    kind: FiatCashFlowKind
+    amount: number
+    currency: FiatCurrency
+    occurred_on?: string
+    note?: string
+  }): Promise<FiatCashFlow & { fx_stale?: boolean }> => {
+    const response = await api.post<FiatCashFlow & { fx_stale?: boolean }>(
+      '/portfolio/cash-flows/',
+      input
+    )
+    return response.data
+  },
+
+  /** `DELETE /api/portfolio/cash-flows/<id>/` — жёсткое удаление операции. */
+  deleteFiatCashFlow: async (id: number): Promise<void> => {
+    await api.delete(`/portfolio/cash-flows/${id}/`)
+  },
+
+  /**
+   * `PATCH /api/portfolio/<id>/currency/` — смена базовой валюты портфеля.
+   *
+   * Бэкенд внутри транзакции пересчитывает `fx_rate_to_base` у всех
+   * существующих `FiatCashFlow`. Если хотя бы один курс пришёл из
+   * fallback'а — вернётся `fx_stale: true` (PLAN11 — A6).
+   */
+  setBaseCurrency: async (
+    portfolioId: number,
+    currency: FiatCurrency,
+    manualUsdEurRate?: number | null
+  ): Promise<{
+    ok: true
+    base_currency: FiatCurrency
+    manual_usd_eur_rate: number | null
+    fx_stale: boolean
+  }> => {
+    const payload: {
+      base_currency: FiatCurrency
+      manual_usd_eur_rate?: number | null
+    } = { base_currency: currency }
+    if (manualUsdEurRate !== undefined) {
+      payload.manual_usd_eur_rate = manualUsdEurRate
+    }
+    const response = await api.patch<{
+      ok: true
+      base_currency: FiatCurrency
+      manual_usd_eur_rate: number | null
+      fx_stale: boolean
+    }>(`/portfolio/${portfolioId}/currency/`, payload)
+    return response.data
   },
 }
 

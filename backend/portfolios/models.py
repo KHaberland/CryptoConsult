@@ -1,10 +1,19 @@
+from decimal import Decimal
+
 from django.db import models
 from django.conf import settings
 
 
 class Portfolio(models.Model):
     """Инвестиционный портфель пользователя."""
-    
+
+    CURRENCY_USD = 'USD'
+    CURRENCY_EUR = 'EUR'
+    CURRENCY_CHOICES = [
+        (CURRENCY_USD, 'Доллар США (USD)'),
+        (CURRENCY_EUR, 'Евро (EUR)'),
+    ]
+
     # Опциональная связь с User (для будущей регистрации)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -32,7 +41,22 @@ class Portfolio(models.Model):
         decimal_places=2,
         verbose_name='Начальная сумма ($)'
     )
-    
+
+    base_currency = models.CharField(
+        max_length=3,
+        choices=CURRENCY_CHOICES,
+        default=CURRENCY_USD,
+        verbose_name='Базовая валюта для P&L по фиату',
+    )
+
+    manual_usd_eur_rate = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        verbose_name='Ручной курс USD→EUR для фиатного P&L',
+    )
+
     start_date = models.DateField(
         auto_now_add=True,
         verbose_name='Дата создания'
@@ -607,6 +631,73 @@ class HoldingAdjustment(models.Model):
             f'{self.holding.symbol} @ {self.holding.wallet.name}: '
             f'{self.units_before} → {self.units_after} ({self.get_reason_display()})'
         )
+
+
+class FiatCashFlow(models.Model):
+    """Фиатное движение средств по портфелю (USD/EUR).
+
+    Используется ТОЛЬКО для расчёта прибыли/убытка на dashboard.
+    НЕ связано с Portfolio.initial_amount/PortfolioContribution/
+    PortfolioWithdrawal — те остаются для DCA/onboarding-механик.
+    """
+
+    KIND_DEPOSIT = 'deposit'
+    KIND_WITHDRAWAL = 'withdrawal'
+    KIND_CHOICES = [
+        (KIND_DEPOSIT, 'Внесение фиата'),
+        (KIND_WITHDRAWAL, 'Вывод фиата'),
+    ]
+
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='fiat_cash_flows',
+        verbose_name='Портфель',
+    )
+    kind = models.CharField(
+        max_length=12,
+        choices=KIND_CHOICES,
+        verbose_name='Тип операции',
+    )
+    amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        verbose_name='Сумма',
+    )
+    currency = models.CharField(
+        max_length=3,
+        choices=Portfolio.CURRENCY_CHOICES,
+        verbose_name='Валюта операции',
+    )
+    fx_rate_to_base = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        default=Decimal('1.000000'),
+        verbose_name='Курс currency → portfolio.base_currency',
+    )
+    occurred_on = models.DateField(verbose_name='Дата операции')
+    note = models.CharField(
+        max_length=200,
+        blank=True,
+        default='',
+        verbose_name='Комментарий',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Фиатное движение'
+        verbose_name_plural = 'Фиатные движения'
+        ordering = ['-occurred_on', '-created_at']
+        indexes = [
+            models.Index(fields=['portfolio', 'kind', 'occurred_on']),
+        ]
+
+    @property
+    def amount_in_base(self) -> Decimal:
+        return (self.amount or Decimal('0')) * (self.fx_rate_to_base or Decimal('1'))
+
+    def __str__(self):
+        return f'{self.get_kind_display()} {self.amount} {self.currency} ({self.occurred_on})'
 
 
 # Базовый портфель по умолчанию
